@@ -5,7 +5,7 @@ from typing import Callable, Dict, List
 
 
 from src.utils.decorators import retry
-from src.utils.file_utils import open_pyarrow_file
+from src.utils.file_utils import open_local_or_remote, open_pyarrow_file
 
 # We suppress the tensorflow warnings. Needs to happend before the tf import
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -226,3 +226,48 @@ class TFRecordIterator(RawDataIterator):
 
     def get_file_suffix(self) -> str:
         return "tfrecord.gz"
+
+
+class TextFileIterator(RawDataIterator):
+    """Iterator for plain-text files with one integer item ID per line.
+
+    Each yielded row is {"id": int}.  Blank lines and lines starting with '#'
+    are skipped so header/comment lines are tolerated.
+    """
+
+    def iterrows(self):
+        assert self.list_of_file_paths is not None, "list_of_file_paths is not set"
+        paths = (
+            self.list_of_file_paths
+            if isinstance(self.list_of_file_paths, list)
+            else [self.list_of_file_paths]
+        )
+        rows = []
+        for path in paths:
+            with open_local_or_remote(path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    rows.append({"id": int(line)})
+        if self.should_shuffle_rows:
+            random.shuffle(rows)
+        yield from rows
+
+    def iter_batches(self, batch_size: int):
+        batch = []
+        for row in self.iterrows():
+            batch.append(row)
+            if len(batch) == batch_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+
+    def shuffle(self, seed=42) -> "TextFileIterator":
+        random.seed(seed)
+        random.shuffle(self.list_of_file_paths)
+        return self
+
+    def get_file_suffix(self) -> str:
+        return "txt"

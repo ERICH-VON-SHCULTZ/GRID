@@ -149,6 +149,11 @@ def save_metadata_to_local_or_remote(
     # Convert metadata to JSON string
     json_content = json.dumps(metadata.to_dict(), indent=2)
 
+    # Ensure parent directory exists for local paths.
+    if not metadata_path.startswith("gs://"):
+        import os
+        os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+
     # Use the open_local_or_remote function which should handle gs:// paths
     with open_local_or_remote(metadata_path, "w") as f:
         f.write(json_content)

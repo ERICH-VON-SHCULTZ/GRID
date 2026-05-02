@@ -25,15 +25,9 @@ def login_wandb():
     """
     If WANDB_API_KEY is set in the environment, login to wandb.
     """
-    # Load environment variables from .env file
+    # Load .env if present; WandbLogger picks up WANDB_API_KEY from env automatically.
+    # Explicit wandb.login() is skipped — it fails in no-tty with non-standard key formats.
     load_dotenv()
-
-    # Now you can access the WANDB_API_KEY
-    wandb_api_key = os.getenv("WANDB_API_KEY")
-    if wandb_api_key:
-        import wandb
-
-        wandb.login(key=wandb_api_key, relogin=True)
 
 
 @rank_zero_only

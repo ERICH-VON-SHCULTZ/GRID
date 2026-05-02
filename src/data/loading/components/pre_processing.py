@@ -60,10 +60,15 @@ def convert_to_dense_numpy_array(
     **kwargs,
 ) -> Dict[str, np.ndarray]:
     # Transform a tfrecord example to a dictionary of numpy arrays, converting sparse tensors to dense numpy arrays.
-
+    # Plain Python scalars/lists (e.g. from TextFileIterator) are left as-is.
     for k in batch_or_row:
         if is_feature_in_features_to_apply(features_to_apply, k):
-            batch_or_row[k] = tf.sparse.to_dense(batch_or_row[k]).numpy()
+            v = batch_or_row[k]
+            if isinstance(v, tf.SparseTensor):
+                batch_or_row[k] = tf.sparse.to_dense(v).numpy()
+            elif isinstance(v, tf.Tensor):
+                batch_or_row[k] = v.numpy()
+            # plain Python int/float/list: leave unchanged for convert_fields_to_tensors
     return batch_or_row
 
 
@@ -291,6 +296,38 @@ def map_sparse_id_to_embedding(
         row[embedding_field_to_add] = embedding_map[row[sparse_id_field]].squeeze()
     else:
         raise ValueError(f"Embedding map not found")
+    return row
+
+
+def map_sparse_id_to_dual_embeddings(
+    row: Dict[str, Any],
+    dataset_config=None,
+    sparse_id_field: str = "id",
+    text_embedding_field: str = "text_emb",
+    image_embedding_field: str = "image_emb",
+    **kwargs,
+) -> Dict[str, Any]:
+    """Map a single integer item ID to both text and image embeddings.
+
+    Reads dataset_config.text_embedding_map and dataset_config.image_embedding_map,
+    both of which must be (max_item_id+1, embed_dim) tensors produced by
+    load_indexed_npy_embeddings. Items with no embedding are zero vectors.
+    """
+    item_id = row[sparse_id_field]
+    if isinstance(item_id, torch.Tensor):
+        item_id = item_id.item()
+    item_id = int(item_id)
+
+    text_map = dataset_config.text_embedding_map
+    image_map = dataset_config.image_embedding_map
+    if text_map is None or image_map is None:
+        raise ValueError(
+            "DualModalityItemDatasetConfig.text_embedding_map and "
+            "image_embedding_map must both be set."
+        )
+
+    row[text_embedding_field] = text_map[item_id].squeeze()
+    row[image_embedding_field] = image_map[item_id].squeeze()
     return row
 
 

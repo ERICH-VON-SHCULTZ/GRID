@@ -1,0 +1,334 @@
+# @package _global_
+# RQVAE training — single-modality baseline using the same SigLIP2 embeddings
+# as MD-RQVAE, with matched encoder/decoder architecture and EMA codebooks.
+#
+# Required overrides:
+#   items_dir=<folder containing the .txt file of item IDs>
+#   codebook_width=<int, must match MD-RQVAE run — e.g. 256 or 1024>
+#
+# Launch example:
+#   python src/train.py experiment=rqvae_siglip_train_flat \
+#       items_dir=/scratch/yw8866/rec-tmall/image_sqf \
+#       codebook_width=256
+
+items_dir: ???
+codebook_width: ???
+
+data_dir: ${items_dir}
+
+text_embedding_path: /scratch/yw8866/rec-tmall/text_embedding/siglip2-so400m-patch14-384.npy
+text_id_map_path: /scratch/yw8866/rec-tmall/text_embedding/siglip2-so400m-patch14-384_ids.pkl
+image_embedding_path: /scratch/yw8866/rec-tmall/image_embedding/siglip2-so400m-patch14-384.npy
+image_id_map_path: /scratch/yw8866/rec-tmall/image_embedding/siglip2-so400m-patch14-384_ids.pkl
+
+embedding_dim: 2304    # 1152 (text) + 1152 (image) concatenated
+latent_dim: 512
+
+task_name: train
+id: ${now:%Y-%m-%d}/${now:%H-%M-%S}
+tags:
+  - rqvae-siglip-train
+train: true
+test: false
+ckpt_path: null
+seed: 42
+
+# ---------------------------------------------------------------------------
+# Data loading — mirrors MD-RQVAE: batch embedding lookup in collate_fn
+# ---------------------------------------------------------------------------
+data_loading:
+  features_config:
+    text_embeddings:
+      _target_: src.utils.file_utils.load_indexed_npy_embeddings
+      embedding_path: ${text_embedding_path}
+      id_map_path: ${text_id_map_path}
+    image_embeddings:
+      _target_: src.utils.file_utils.load_indexed_npy_embeddings
+      embedding_path: ${image_embedding_path}
+      id_map_path: ${image_id_map_path}
+    features:
+      - name: id
+        num_placeholder_tokens: 0
+        is_item_ids: true
+        type:
+          _target_: torch.__dict__.get
+          _args_:
+            - int32
+
+  dataset_config:
+    dataset:
+      _target_: src.data.loading.components.interfaces.ItemDatasetConfig
+      item_id_field: id
+      keep_item_id: true
+      iterate_per_row: true
+      data_iterator:
+        _target_: src.data.loading.components.iterators.TextFileIterator
+      features_to_consider: ${extract_fields_from_list_of_dicts:${data_loading.features_config.features},
+        "name", False, "is_item_ids", "True"}
+      embedding_map: null
+      num_placeholder_tokens_map: ${create_map_from_list_of_dicts:${data_loading.features_config.features},
+        "name", "num_placeholder_tokens"}
+      preprocessing_functions:
+        - _target_: src.data.loading.components.pre_processing.filter_features_to_consider
+          _partial_: true
+        - _target_: src.data.loading.components.pre_processing.convert_to_dense_numpy_array
+          _partial_: true
+        - _target_: src.data.loading.components.pre_processing.convert_fields_to_tensors
+          _partial_: true
+      field_type_map: ${create_map_from_list_of_dicts:${data_loading.features_config.features},
+        "name", "type"}
+
+  datamodule:
+    _target_: src.data.loading.datamodules.sequence_datamodule.ItemDataModule
+    train_dataloader_config:
+      _target_: src.data.loading.components.interfaces.ItemDataloaderConfig
+      dataset_class:
+        _target_: src.data.loading.components.dataloading.UnboundedSequenceIterable
+        _partial_: true
+      data_folder: ${items_dir}
+      should_shuffle_rows: true
+      batch_size_per_device: 2048
+      num_workers: 0
+      assign_files_by_size: false
+      timeout: 0
+      drop_last: false
+      pin_memory: false
+      persistent_workers: false
+      collate_fn:
+        _target_: src.data.loading.components.collate_functions.collate_fn_items
+        _partial_: true
+        item_id_field: ${data_loading.dataset_config.dataset.item_id_field}
+        feature_to_input_name: {}
+        text_embedding_map: ${data_loading.features_config.text_embeddings}
+        image_embedding_map: ${data_loading.features_config.image_embeddings}
+        text_embedding_field: text_emb
+        image_embedding_field: image_emb
+        concat_modalities: true
+        concat_output_name: input_embedding
+      dataset_config: ${data_loading.dataset_config.dataset}
+      limit_files: null
+      assign_all_files_per_worker: true
+    val_dataloader_config:
+      _target_: src.data.loading.components.interfaces.ItemDataloaderConfig
+      dataset_class:
+        _target_: src.data.loading.components.dataloading.UnboundedSequenceIterable
+        _partial_: true
+      data_folder: ${items_dir}
+      should_shuffle_rows: false
+      batch_size_per_device: 256
+      num_workers: 0
+      assign_files_by_size: true
+      timeout: 0
+      drop_last: false
+      pin_memory: false
+      persistent_workers: false
+      collate_fn:
+        _target_: src.data.loading.components.collate_functions.collate_fn_items
+        _partial_: true
+        item_id_field: ${data_loading.dataset_config.dataset.item_id_field}
+        feature_to_input_name: {}
+        text_embedding_map: ${data_loading.features_config.text_embeddings}
+        image_embedding_map: ${data_loading.features_config.image_embeddings}
+        text_embedding_field: text_emb
+        image_embedding_field: image_emb
+        concat_modalities: true
+        concat_output_name: input_embedding
+      dataset_config: ${data_loading.dataset_config.dataset}
+      limit_files: null
+    test_dataloader_config:
+      _target_: src.data.loading.components.interfaces.ItemDataloaderConfig
+      dataset_class:
+        _target_: src.data.loading.components.dataloading.UnboundedSequenceIterable
+        _partial_: true
+      data_folder: ${items_dir}
+      should_shuffle_rows: false
+      batch_size_per_device: 256
+      num_workers: 0
+      assign_files_by_size: true
+      timeout: 0
+      drop_last: false
+      pin_memory: false
+      persistent_workers: false
+      collate_fn:
+        _target_: src.data.loading.components.collate_functions.collate_fn_items
+        _partial_: true
+        item_id_field: ${data_loading.dataset_config.dataset.item_id_field}
+        feature_to_input_name: {}
+        text_embedding_map: ${data_loading.features_config.text_embeddings}
+        image_embedding_map: ${data_loading.features_config.image_embeddings}
+        text_embedding_field: text_emb
+        image_embedding_field: image_emb
+        concat_modalities: true
+        concat_output_name: input_embedding
+      dataset_config: ${data_loading.dataset_config.dataset}
+      limit_files: null
+
+# ---------------------------------------------------------------------------
+# Model — ResidualQuantization with architecture matched to MD-RQVAE
+# ---------------------------------------------------------------------------
+model:
+  _target_: src.modules.clustering.residual_quantization.ResidualQuantization
+  input_dim: ${embedding_dim}
+  n_layers: 3
+  track_residuals: true
+  verbose: false
+  train_layer_wise: false
+  normalize_residuals: false
+  init_buffer_size: 8192
+
+  normalization_layer:
+    _target_: torch.nn.Sequential
+    _args_:
+      - _target_: torch.nn.BatchNorm1d
+        num_features: ${embedding_dim}
+      - _target_: src.models.components.network_blocks.normalize_layer.NormalizeLayer
+
+  # Encoder: 1152 → 768 → 256 → 512  (mirrors MD-RQVAE text/image encoders)
+  encoder:
+    _target_: src.models.components.network_blocks.mlp.MLP
+    input_dim: ${embedding_dim}
+    hidden_dim_list:
+      - 768
+      - 256
+    output_dim: ${latent_dim}
+    activation:
+      _target_: torch.nn.ReLU
+      _partial_: true
+
+  # Decoder: 512 → 256 → 768 → 1152
+  decoder:
+    _target_: src.models.components.network_blocks.mlp.MLP
+    input_dim: ${latent_dim}
+    hidden_dim_list:
+      - 256
+      - 768
+    output_dim: ${embedding_dim}
+    activation:
+      _target_: torch.nn.ReLU
+      _partial_: true
+
+  # EMA codebook — same type as MD-RQVAE codebooks
+  quantization_layer:
+    _target_: src.modules.clustering.vector_quantization.EMAVectorQuantization
+    n_clusters: ${codebook_width}
+    n_features: ${latent_dim}
+    ema_decay: 0.99
+    dead_code_threshold: 1.0
+    distance_function:
+      _target_: src.components.distance_functions.SquaredEuclideanDistance
+    quantization_strategy:
+      _target_: src.components.quantization_strategies.STEQuantization
+      distance_function: ${model.quantization_layer.distance_function}
+      compute_reconstruction_loss_embeddings: true
+    initializer:
+      _target_: src.components.clustering_initializers.KMeansPlusPlusInitInitializer
+      n_clusters: ${model.quantization_layer.n_clusters}
+      initialize_on_cpu: false
+      distance_function: ${model.quantization_layer.distance_function}
+    init_buffer_size: ${model.init_buffer_size}
+
+  quantization_layer_list: null
+  reconstruction_loss_function:
+    _target_: torch.nn.MSELoss
+    reduction: mean
+  reconstruction_loss_weight: 1.0
+  training_loop_function:
+    _target_: src.components.training_loop_functions.scale_loss_by_world_size_for_initialization_training_loop
+    _partial_: true
+  optimizer: ${optim.optimizer}
+  scheduler: null
+
+# ---------------------------------------------------------------------------
+# Callbacks
+# ---------------------------------------------------------------------------
+callbacks:
+  model_checkpoint:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    filename: checkpoint_{epoch:03d}_{step:06d}
+    monitor: train/loss
+    verbose: true
+    save_last: null
+    save_top_k: 1
+    mode: min
+    auto_insert_metric_name: false
+    save_weights_only: true
+    every_n_train_steps: ${trainer.max_steps}
+    train_time_interval: null
+    every_n_epochs: null
+    save_on_train_epoch_end: null
+  early_stopping: null
+  model_summary:
+    _target_: lightning.pytorch.callbacks.RichModelSummary
+    max_depth: -1
+
+# ---------------------------------------------------------------------------
+# Logger
+# ---------------------------------------------------------------------------
+logger:
+  csv:
+    _target_: lightning.pytorch.loggers.csv_logs.CSVLogger
+    save_dir: ${paths.output_dir}
+    name: csv/
+    prefix: ''
+  wandb:
+    _target_: lightning.pytorch.loggers.wandb.WandbLogger
+    project: MMMBGRec
+    name: rqvae-siglip-${now:%Y-%m-%d_%H-%M-%S}
+    save_dir: ${paths.output_dir}
+    log_model: false
+
+# ---------------------------------------------------------------------------
+# Trainer
+# ---------------------------------------------------------------------------
+trainer:
+  _target_: lightning.pytorch.trainer.Trainer
+  default_root_dir: ${paths.output_dir}
+  min_steps: 1
+  max_steps: 10000
+  max_epochs: 10
+  accelerator: gpu
+  devices: -1
+  num_nodes: 1
+  precision: bf16-mixed
+  log_every_n_steps: 100
+  val_check_interval: 100000000
+  deterministic: false
+  accumulate_grad_batches: 1
+  profiler:
+    _target_: lightning.pytorch.profilers.PassThroughProfiler
+  strategy: auto
+  sync_batchnorm: false
+  num_sanity_val_steps: 0
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+paths:
+  root_dir: .
+  data_dir: ${data_dir}
+  log_dir: ${paths.root_dir}/logs
+  output_dir: ${hydra:runtime.output_dir}
+  work_dir: ${hydra:runtime.cwd}
+  profile_dir: ${hydra:run.dir}/profile_output
+  metadata_dir: ${paths.output_dir}/metadata
+
+extras:
+  ignore_warnings: false
+  enforce_tags: true
+  print_config_warnings: true
+  print_config: true
+
+# ---------------------------------------------------------------------------
+# Optimizer
+# ---------------------------------------------------------------------------
+optim:
+  optimizer:
+    _target_: torch.optim.Adagrad
+    _partial_: true
+    lr: 0.001
+    weight_decay: 0.0
+
+eval:
+  evaluator:
+    placeholder_token_buffer: 0

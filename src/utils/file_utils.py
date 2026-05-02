@@ -1,9 +1,12 @@
 import json
 import logging
 import os
+import pickle
 from shutil import SameFileError
 from typing import BinaryIO, List, Optional
 
+import numpy as np
+import torch
 from fsspec.core import url_to_fs
 from lightning.fabric.utilities.types import _PATH
 from pyarrow import fs as pyarrow_fs
@@ -151,6 +154,119 @@ def list_files(
         if should_update_prefix
         else fs.glob(f"{folder_path}/{suffix}")
     )
+
+
+class IndexedEmbeddingLookup:
+    """Compact embedding matrix with a sparse integer ID → row-index lookup.
+
+    Supports item_id indexing without building a dense (max_id+1, d) tensor,
+    which would be ~35 GB for this dataset.  The backing store is a np.memmap
+    so the OS pages embeddings in on demand rather than loading all 23 GB.
+    Items absent from the ID map return a zero vector.
+    """
+
+    def __init__(self, embeddings: np.ndarray, id_to_row: dict) -> None:
+        self.embeddings = embeddings          # (N, embed_dim), may be a memmap
+        self.id_to_row = id_to_row            # {int item_id: int row_idx}
+        self._embed_dim = embeddings.shape[1]
+
+    def __getitem__(self, item_id: int) -> torch.Tensor:
+        row = self.id_to_row.get(int(item_id), None)
+        if row is None:
+            return torch.zeros(self._embed_dim, dtype=torch.float32)
+        return torch.tensor(self.embeddings[row], dtype=torch.float32)
+
+    def get_batch(self, item_ids) -> torch.Tensor:
+        """Batch lookup via a single numpy fancy index — O(B) instead of O(B) Python calls.
+
+        Returns a (B, embed_dim) float32 tensor. Missing IDs get zero vectors.
+        """
+        B = len(item_ids)
+        rows = np.empty(B, dtype=np.intp)
+        missing = []
+        for i, iid in enumerate(item_ids):
+            r = self.id_to_row.get(int(iid), -1)
+            rows[i] = r
+            if r < 0:
+                missing.append(i)
+
+        result = np.empty((B, self._embed_dim), dtype=np.float32)
+        valid_mask = rows >= 0
+        if valid_mask.any():
+            result[valid_mask] = self.embeddings[rows[valid_mask]]
+        if missing:
+            result[missing] = 0.0
+        return torch.from_numpy(result)
+
+
+# Process-level cache so the same (embedding_path, id_map_path) pair is only
+# loaded once.  Critical when text and image use the same file: without this,
+# both maps allocate independent ~25 GB arrays and the job OOM-kills.
+_embedding_cache: dict = {}
+
+
+def load_indexed_npy_embeddings(
+    embedding_path: str,
+    id_map_path: str,
+) -> "IndexedEmbeddingLookup":
+    """Load a float32 embedding file paired with a .pkl item-ID list.
+
+    Supports standard .npy files and raw float32 binary dumps (detected by
+    the absence of the numpy magic bytes).  Returns an IndexedEmbeddingLookup
+    that maps integer item IDs to float32 vectors on demand, avoiding the
+    need to materialise a dense sparse-ID-indexed tensor.
+
+    Calls with the same paths return the *same* object (process-level cache),
+    so text and image embedding maps that point to the same file share one copy.
+
+    Args:
+        embedding_path: Path to a .npy file or raw float32 binary of shape (N, d).
+        id_map_path: Path to a .pkl file containing either
+            - a list  where list[row_idx] == item_id (str or int), or
+            - a dict  where dict[item_id] == row_idx.
+    """
+    key = (embedding_path, id_map_path)
+    if key in _embedding_cache:
+        return _embedding_cache[key]
+
+    with open(id_map_path, "rb") as f:
+        id_map = pickle.load(f)
+
+    if isinstance(id_map, dict):
+        id_to_row = {int(k): int(v) for k, v in id_map.items()}
+    else:
+        id_to_row = {int(item_id): row_idx for row_idx, item_id in enumerate(id_map)}
+
+    n_rows = len(id_to_row)
+
+    # Detect format: standard .npy starts with b'\x93NUMPY'; anything else is
+    # treated as a raw float32 binary dump (common for large embedding exports).
+    with open(embedding_path, "rb") as f:
+        magic = f.read(6)
+
+    if magic[:6] == b"\x93NUMPY":
+        # Use mmap so startup is instant even for 24+ GB files on slow Lustre.
+        # The OS page cache warms up naturally over the first few thousand batches;
+        # with 180 GB RAM the full 48 GB (text + image) fits in cache eventually.
+        # Batch lookup (get_batch) is still O(1) C-level numpy gather — much
+        # faster than the old per-item torch.tensor() calls regardless of mmap.
+        try:
+            embeddings = np.load(embedding_path, mmap_mode="r", allow_pickle=False)
+            if embeddings.dtype != np.float32:
+                # dtype conversion materialises the full array; unavoidable here.
+                embeddings = np.array(embeddings, dtype=np.float32)
+        except ValueError:
+            embeddings = np.load(embedding_path, allow_pickle=True).astype(np.float32)
+    else:
+        total_floats = os.path.getsize(embedding_path) // 4
+        embed_dim = total_floats // n_rows
+        embeddings = np.memmap(
+            embedding_path, dtype=np.float32, mode="r", shape=(n_rows, embed_dim)
+        )
+
+    result = IndexedEmbeddingLookup(embeddings, id_to_row)
+    _embedding_cache[key] = result
+    return result
 
 
 def replace_char_after_segment(

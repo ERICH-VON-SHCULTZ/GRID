@@ -284,44 +284,86 @@ def collate_fn_items(
     batch: Union[List[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]],
     item_id_field: str,
     feature_to_input_name: Dict[str, str],  # type: ignore
+    text_embedding_map=None,
+    image_embedding_map=None,
+    text_embedding_field: str = "text_emb",
+    image_embedding_field: str = "image_emb",
+    concat_modalities: bool = False,
+    concat_output_name: str = "input_embedding",
 ) -> ItemData:
     """The collate function passed to the item dataloader.
+
+    When text_embedding_map / image_embedding_map are provided, embedding lookup
+    is done here as a single batch numpy fancy-index instead of one torch.tensor()
+    call per item in the preprocessing step.  This eliminates O(B) Python-level
+    overhead and replaces it with one C-level numpy gather.
+
+    When concat_modalities=True, text and image embeddings are concatenated along
+    the feature dimension and stored under concat_output_name instead of separately.
 
     Parameters
     ----------
     batch : Union[List[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]
-        The batch of data to be collated. Can be a list of dictionaries, in the case we
-        loaded the data per row, or a dictionary of tensors, in the case loaded the data
-        per batch.
+        The batch of data to be collated.
     item_id_field : str
         The name of the field in the batch that contains the item IDs.
     feature_to_input_name : Dict[str, str]
         The mapping from raw feature name to input feature name in ItemData.
+    text_embedding_map : IndexedEmbeddingLookup, optional
+        If provided, text embeddings are looked up here in batch.
+    image_embedding_map : IndexedEmbeddingLookup, optional
+        If provided, image embeddings are looked up here in batch.
+    text_embedding_field : str
+        Field name used when storing text embeddings (must be in feature_to_input_name).
+    image_embedding_field : str
+        Field name used when storing image embeddings (must be in feature_to_input_name).
+    concat_modalities : bool
+        If True, concatenate text and image embeddings along dim=-1 and store
+        the result under concat_output_name rather than separately.
+    concat_output_name : str
+        Key under which the concatenated embedding is stored when concat_modalities=True.
 
     Returns:
     --------
     model_input_data : ItemData
-        An ItemData object, which stores a batch of item features via a list of item IDs
-        in the field `item_ids` and a dictionary mapping feature names to value tensors
-        stacked along the batch dimension.
     """
     if isinstance(batch, list):
         batch = combine_list_of_tensor_dicts(batch)  # type: ignore
-        # does not change shape of text tokens
 
     model_input_data = ItemData()
+    item_ids = None
 
     for field_name, field_value in batch.items():  # type: ignore
         if field_name == item_id_field:
-            model_input_data.item_ids = list(field_value)
-
+            item_ids = list(field_value)
+            model_input_data.item_ids = item_ids
+        elif field_name in (text_embedding_field, image_embedding_field) and (
+            text_embedding_map is not None or image_embedding_map is not None
+        ):
+            # Embeddings will be injected below via batch lookup — skip per-item stack.
+            pass
         else:
-            # In this case, field_value is a list of tensors, each representing the
-            # features of a single item. We stack these tensors along the batch
-            # dimension to create a single tensor for the batch of items.
             field_value = torch.stack(field_value, dim=0)
             model_input_data.transformed_features[
                 feature_to_input_name[field_name]
             ] = field_value
+
+    # Batch embedding lookup: one numpy fancy-index replaces B torch.tensor() calls.
+    if item_ids is not None:
+        if concat_modalities and text_embedding_map is not None and image_embedding_map is not None:
+            text_batch = text_embedding_map.get_batch(item_ids)
+            image_batch = image_embedding_map.get_batch(item_ids)
+            model_input_data.transformed_features[concat_output_name] = torch.cat(
+                [text_batch, image_batch], dim=-1
+            )
+        else:
+            if text_embedding_map is not None and text_embedding_field in feature_to_input_name:
+                model_input_data.transformed_features[
+                    feature_to_input_name[text_embedding_field]
+                ] = text_embedding_map.get_batch(item_ids)
+            if image_embedding_map is not None and image_embedding_field in feature_to_input_name:
+                model_input_data.transformed_features[
+                    feature_to_input_name[image_embedding_field]
+                ] = image_embedding_map.get_batch(item_ids)
 
     return model_input_data

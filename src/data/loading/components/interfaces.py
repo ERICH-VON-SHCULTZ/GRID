@@ -350,6 +350,19 @@ class ItemData:
 
 
 @dataclass
+class DualModalityItemDatasetConfig(ItemDatasetConfig):
+    """ItemDatasetConfig extended with separate text and image embedding maps.
+
+    Use with map_sparse_id_to_dual_embeddings preprocessing function.
+    Both tensors are indexed by item ID (shape: max_item_id+1 x embed_dim).
+    Missing items (absent from the ID list) are represented as zero vectors.
+    """
+
+    text_embedding_map: Optional[torch.Tensor] = None
+    image_embedding_map: Optional[torch.Tensor] = None
+
+
+@dataclass
 class ItemTextData(ItemData):
     """The data class used to wrap a batch of items with text features for training/testing.
 

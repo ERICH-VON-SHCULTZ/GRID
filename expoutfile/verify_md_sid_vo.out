@@ -1,0 +1,69 @@
+
+Loading SIDs from: /scratch/yw8866/logs/inference/runs/2026-04-26/mdrqvae_1e_256/pickle/merged_predictions.pkl
+Loaded 5,409,793 items  |  3 SID levels per item  |  codebook_width=256
+
+============================================================
+1. ACTIVE RATIO TEST  (index collapse detection)
+============================================================
+  Level 0:  194/256 codes active  (75.8%)  ✓
+  Level 1:   13/256 codes active  (5.1%)  ⚠ POSSIBLE COLLAPSE
+  Level 2:   10/256 codes active  (3.9%)  ⚠ POSSIBLE COLLAPSE
+
+============================================================
+2. COLLISION RATE TEST
+============================================================
+  Total items:             5,409,793
+  Unique SID tuples:           8,734
+  Collision rate:             99.98%
+  SID tuples w/ collisions:    7,655
+  Items in any collision:  5,408,714  (99.98%)
+  Largest collision group: 102132 items share the same SID
+  Top-5 collision sizes:   [102132, 93636, 91999, 76310, 66767]
+  Collision size distribution (size: count):
+    2 items sharing same SID: 599 groups
+    3 items sharing same SID: 405 groups
+    4 items sharing same SID: 315 groups
+    5 items sharing same SID: 238 groups
+    6 items sharing same SID: 175 groups
+    7 items sharing same SID: 176 groups
+    8 items sharing same SID: 144 groups
+    9 items sharing same SID: 114 groups
+    10 items sharing same SID: 136 groups
+    11 items sharing same SID: 117 groups
+
+============================================================
+3. CODEBOOK ENTROPY  (distribution uniformity)
+============================================================
+  Max theoretical entropy: 8.000 bits  (uniform distribution)
+  Level 0: entropy=5.457 bits  efficiency=68.2%  ⚠ LOW
+  Level 1: entropy=3.382 bits  efficiency=42.3%  ⚠ LOW
+  Level 2: entropy=3.136 bits  efficiency=39.2%  ⚠ LOW
+
+============================================================
+4. SID COVERAGE
+============================================================
+  Num levels:               3
+  Codebook width:           256
+  Theoretical capacity:               16,777,216
+  Items:                               5,409,793
+  Unique SIDs used:                        8,734
+  Uniqueness (unique/items): 0.0016
+  Capacity utilisation:      5.21e-04
+
+============================================================
+5. LEVEL INDEPENDENCE  (inter-level correlation)
+============================================================
+  Level 0 vs Level 1: identical code rate = 0.37%  ✓ independent
+  Level 0 vs Level 2: identical code rate = 0.14%  ✓ independent
+  Level 1 vs Level 2: identical code rate = 0.03%  ✓ independent
+
+============================================================
+6. ITEM INTEGRITY CHECK  (duplicate item IDs)
+============================================================
+  Total entries:             5,409,793
+  Unique item IDs:           5,409,793
+  Items with multiple SIDs: ✓ none
+
+============================================================
+VERIFICATION COMPLETE
+============================================================

@@ -1,10 +1,24 @@
+import functools
 import os
+import pickle
 from typing import Any, Dict, Optional, Tuple
 
 import hydra
 import rootutils
 import torch
 from omegaconf import DictConfig
+
+# torch.save's pickle_protocol default is bound at import time (protocol 2).
+# Reassigning DEFAULT_PROTOCOL after import has no effect on torch.save's
+# default argument.  Monkey-patch torch.save so all calls default to
+# protocol 5, which supports objects ≥ 4 GiB.
+_orig_torch_save = torch.save
+
+@functools.wraps(_orig_torch_save)
+def _torch_save_p5(obj, f, pickle_module=pickle, pickle_protocol=5, **kwargs):
+    return _orig_torch_save(obj, f, pickle_module=pickle_module, pickle_protocol=pickle_protocol, **kwargs)
+
+torch.save = _torch_save_p5
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
