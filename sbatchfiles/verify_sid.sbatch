@@ -7,7 +7,7 @@
 #SBATCH --time=4:00:00
 #SBATCH --mem=64GB
 #SBATCH --job-name=verify_sid
-#SBATCH --output=/scratch/yw8866/GRID/expoutfile/verify_tiger_sid_1024_v0.out
+#SBATCH --output=/scratch/yw8866/GRID/expoutfile/verify_md_sid_1024_v0.out
 
 module purge
 
@@ -21,7 +21,7 @@ conda activate py310
 
 
 python /scratch/yw8866/GRID/src/utils/verify_sids.py \
-    --pkl_path /scratch/yw8866/logs/inference/runs/2026-04-29/tiger_1024/pickle/merged_predictions.pkl \
-    --codebook_width 1024
-
+    --pkl_path /scratch/yw8866/logs/inference/runs/2026-04-28/v0/pickle/merged_predictions.pkl \
+    --codebook_width 1024 \
+     --convert
 "

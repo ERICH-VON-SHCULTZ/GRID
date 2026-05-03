@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import os
 import pickle
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -220,6 +221,53 @@ def test_item_integrity(item_ids: list, sids: list) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Conversion: pkl → .pt tensor indexed by item_id
+# ---------------------------------------------------------------------------
+def convert_to_pt(pkl_path: str, key_name: str, sid_name: str) -> str:
+    """
+    Convert merged_predictions.pkl into a semantic_ids.pt tensor of shape
+    (num_hierarchies, max_item_id+1), saved alongside the pkl.
+
+    The tensor is indexed directly by original item_id so that
+    id_map.t()[item_id] returns the SID tuple for any item — this handles
+    non-0-indexed and sparse item ID spaces (e.g. Tmall IDs up to 8M).
+    """
+    _header("CONVERTING TO .pt TENSOR")
+    with open(pkl_path, "rb") as f:
+        data = pickle.load(f)
+
+    if not data:
+        print("  ERROR: empty pkl file — skipping conversion")
+        return None
+
+    max_id = max(int(row[key_name]) for row in data)
+    num_hierarchies = len(data[0][sid_name])
+    print(f"  Items loaded:          {len(data):,}")
+    print(f"  max_item_id:           {max_id:,}")
+    print(f"  num_hierarchies:       {num_hierarchies}")
+    print(f"  Tensor shape (before T): ({max_id + 1}, {num_hierarchies})")
+
+    tensor = torch.zeros((max_id + 1, num_hierarchies), dtype=torch.long)
+    for row in data:
+        iid = int(row[key_name])
+        sid = row[sid_name]
+        if isinstance(sid, torch.Tensor):
+            tensor[iid] = sid.long()
+        else:
+            tensor[iid] = torch.as_tensor(list(sid), dtype=torch.long)
+
+    # Transpose to (num_hierarchies, max_id+1) — shape map_sparse_id_to_semantic_id expects
+    out_tensor = tensor.t().contiguous()
+    out_path = os.path.join(os.path.dirname(pkl_path), "semantic_ids.pt")
+    torch.save(out_tensor, out_path)
+
+    size_mb = out_tensor.element_size() * out_tensor.numel() / 1024 / 1024
+    print(f"  Saved: {out_path}")
+    print(f"  Final shape: {tuple(out_tensor.shape)}  ({size_mb:.1f} MB)")
+    return out_path
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -242,6 +290,10 @@ def main():
         "--sid_name", type=str, default="cluster_ids",
         help="Dict key for the SID field (default: cluster_ids)"
     )
+    parser.add_argument(
+        "--convert", action="store_true", default=False,
+        help="After verification, convert pkl to semantic_ids.pt alongside the pkl file"
+    )
     args = parser.parse_args()
 
     pkl_path = Path(args.pkl_path)
@@ -260,8 +312,13 @@ def main():
     test_level_independence(sids)
     test_item_integrity(item_ids, sids)
 
+    if args.convert:
+        out_path = convert_to_pt(str(pkl_path), args.key_name, args.sid_name)
+
     print(f"\n{'='*60}")
     print("VERIFICATION COMPLETE")
+    if args.convert and out_path:
+        print(f"semantic_ids.pt written to: {out_path}")
     print("="*60)
 
 

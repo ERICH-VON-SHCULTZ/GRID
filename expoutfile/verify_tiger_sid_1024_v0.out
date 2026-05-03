@@ -65,5 +65,16 @@ Loaded 5,409,793 items  |  3 SID levels per item  |  codebook_width=1024
   Items with multiple SIDs: ✓ none
 
 ============================================================
+CONVERTING TO .pt TENSOR
+============================================================
+  Items loaded:          5,409,793
+  max_item_id:           8,133,507
+  num_hierarchies:       3
+  Tensor shape (before T): (8133508, 3)
+  Saved: /scratch/yw8866/logs/inference/runs/2026-04-29/tiger_1024/pickle/semantic_ids.pt
+  Final shape: (3, 8133508)  (186.2 MB)
+
+============================================================
 VERIFICATION COMPLETE
+semantic_ids.pt written to: /scratch/yw8866/logs/inference/runs/2026-04-29/tiger_1024/pickle/semantic_ids.pt
 ============================================================

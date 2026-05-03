@@ -1,3 +1,5 @@
+import os
+import pickle
 from typing import Optional, Tuple, Union
 
 import torch
@@ -205,3 +207,44 @@ def transpose_tensor_from_file(
         # Save the result to a file
         torch.save(result, file_path)
         return None
+
+
+def build_sid_tensor_from_pkl(
+    file_path: Optional[str] = None,
+    item_id_key: str = "item_id",
+    cluster_ids_key: str = "cluster_ids",
+) -> None:
+    """Convert a merged_predictions.pkl (list of {item_id, cluster_ids} dicts) into a
+    PyTorch tensor of shape (num_hierarchies, max_item_id+1), saved alongside the pkl as
+    semantic_ids.pt.
+
+    The tensor is indexed directly by item_id, so id_map.t()[item_id] returns the SID
+    tuple for any item — regardless of whether item IDs are 0-indexed or sparse.
+
+    Args:
+        file_path: Path to merged_predictions.pkl produced by LocalPickleWriter.
+        item_id_key: Dict key for the item ID (default: "item_id").
+        cluster_ids_key: Dict key for the cluster ID tuple (default: "cluster_ids").
+    """
+    if file_path is None or not file_path.endswith("merged_predictions.pkl"):
+        return None
+
+    with open(file_path, "rb") as f:
+        data = pickle.load(f)
+
+    if not data:
+        return None
+
+    max_id = max(int(row[item_id_key]) for row in data)
+    num_hierarchies = len(data[0][cluster_ids_key])
+
+    # Shape (max_id+1, num_hierarchies); rows for item IDs not in the map stay zero.
+    tensor = torch.zeros((max_id + 1, num_hierarchies), dtype=torch.long)
+    for row in data:
+        iid = int(row[item_id_key])
+        tensor[iid] = torch.as_tensor(row[cluster_ids_key], dtype=torch.long)
+
+    # Transpose to (num_hierarchies, max_id+1) — the shape map_sparse_id_to_semantic_id expects.
+    out_path = os.path.join(os.path.dirname(file_path), "semantic_ids.pt")
+    torch.save(tensor.t().contiguous(), out_path)
+    return None
