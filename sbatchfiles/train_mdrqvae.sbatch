@@ -8,7 +8,7 @@
 #SBATCH --mem=300GB
 #SBATCH --gres=gpu:h100:1
 #SBATCH --job-name=train_mdrqvae
-#SBATCH --output=/scratch/yw8866/GRID/expoutfile/train_mdrqvae_1024.out
+#SBATCH --output=/scratch/yw8866/GRID/expoutfile/train_mdrqvae_2048_1024.out
 
 module purge
 
@@ -26,6 +26,8 @@ export WANDB_INSECURE_DISABLE_SSL=true
 
 python /scratch/yw8866/GRID/src/train.py experiment=md_rqvae_train_flat \
     items_dir=/scratch/yw8866/rec-tmall/image_sqf \
-    codebook_width=1024 \
+    codebook_width_l1=2048 \
+    codebook_width_l2=1024 \
+    codebook_width_l3=1024 \
     ++should_skip_retry=True
 "

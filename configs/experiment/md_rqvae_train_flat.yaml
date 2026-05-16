@@ -3,7 +3,9 @@
 #
 # Required overrides (must be supplied on the command line):
 #   items_dir=<path to the folder containing the .txt file of item IDs>
-#   codebook_width=<int, e.g. 256>
+#   codebook_width_l1=<int, e.g. 1024>   # shared codebook (layer 1)
+#   codebook_width_l2=<int, e.g. 2048>   # text-specific codebook (layer 2)
+#   codebook_width_l3=<int, e.g. 2048>   # image-specific codebook (layer 3)
 #
 # data_dir is only used for paths.data_dir; set it to the same value as items_dir
 # if you have no separate data root.
@@ -14,10 +16,14 @@
 # Launch example:
 #   python src/train.py experiment=md_rqvae_train_flat \
 #       items_dir=/scratch/yw8866/rec-tmall/image_sqf \
-#       codebook_width=256
+#       codebook_width_l1=1024 \
+#       codebook_width_l2=2048 \
+#       codebook_width_l3=2048
 
 items_dir: ???
-codebook_width: ???
+codebook_width_l1: ???
+codebook_width_l2: ???
+codebook_width_l3: ???
 
 # data_dir is still required by the paths block; set it to any valid directory.
 data_dir: ${items_dir}
@@ -235,7 +241,7 @@ model:
   # EMA codebooks: no gradient updates, dead code revival, K-means++ init
   shared_codebook:
     _target_: src.modules.clustering.vector_quantization.EMAVectorQuantization
-    n_clusters: ${codebook_width}
+    n_clusters: ${codebook_width_l1}
     n_features: ${latent_dim}
     ema_decay: 0.99
     dead_code_threshold: 1.0
@@ -254,7 +260,7 @@ model:
 
   text_codebook:
     _target_: src.modules.clustering.vector_quantization.EMAVectorQuantization
-    n_clusters: ${codebook_width}
+    n_clusters: ${codebook_width_l2}
     n_features: ${latent_dim}
     ema_decay: 0.99
     dead_code_threshold: 1.0
@@ -273,7 +279,7 @@ model:
 
   image_codebook:
     _target_: src.modules.clustering.vector_quantization.EMAVectorQuantization
-    n_clusters: ${codebook_width}
+    n_clusters: ${codebook_width_l3}
     n_features: ${latent_dim}
     ema_decay: 0.99
     dead_code_threshold: 1.0

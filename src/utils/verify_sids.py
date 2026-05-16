@@ -4,14 +4,20 @@ Verification script for Semantic IDs (SIDs) from VQ-based models (MD-RQVAE, TIGE
 Supports any number of SID levels (3-level MDRQVAE, 4-level TIGER, etc.)
 
 Usage:
+    # Uniform codebook width across all levels:
     python src/utils/verify_sids.py \
-        --pkl_path /scratch/yw8866/logs/inference/runs/2026-04-26/mdrqvae_1e_256/pickle/merged_predictions.pkl \
-        --codebook_width 256
+        --pkl_path /scratch/yw8866/logs/inference/runs/.../pickle/merged_predictions.pkl \
+        --codebook_widths 256
+
+    # Per-layer widths (comma-separated, one per SID level):
+    python src/utils/verify_sids.py \
+        --pkl_path /scratch/yw8866/logs/inference/runs/.../pickle/merged_predictions.pkl \
+        --codebook_widths 1024,2048,2048
 
     # For TIGER-style SIDs with different key names:
     python src/utils/verify_sids.py \
         --pkl_path /path/to/predictions.pkl \
-        --codebook_width 256 \
+        --codebook_widths 256 \
         --key_name user_id \
         --sid_name semantic_id
 """
@@ -53,9 +59,9 @@ def _header(title):
 # ---------------------------------------------------------------------------
 # Test 1: Active ratio (index collapse detection)
 # ---------------------------------------------------------------------------
-def test_active_ratio(sids: list, codebook_width: int) -> dict:
+def test_active_ratio(sids: list, codebook_widths: list) -> dict:
     """
-    For each codebook level, how many of the codebook_width codes are ever assigned?
+    For each codebook level, how many of the codebook_widths[lvl] codes are ever assigned?
     Active ratio < 50% is a strong signal of index collapse.
     """
     _header("1. ACTIVE RATIO TEST  (index collapse detection)")
@@ -63,10 +69,11 @@ def test_active_ratio(sids: list, codebook_width: int) -> dict:
     num_levels = arr.shape[1]
     results = {}
     for lvl in range(num_levels):
+        width = codebook_widths[lvl]
         n_active = len(np.unique(arr[:, lvl]))
-        ratio = n_active / codebook_width
+        ratio = n_active / width
         flag = "✓" if ratio >= 0.5 else "⚠ POSSIBLE COLLAPSE"
-        print(f"  Level {lvl}: {n_active:>4d}/{codebook_width} codes active  ({ratio:.1%})  {flag}")
+        print(f"  Level {lvl}: {n_active:>4d}/{width} codes active  ({ratio:.1%})  {flag}")
         results[lvl] = {"active_count": n_active, "active_ratio": ratio}
     return results
 
@@ -116,26 +123,26 @@ def test_collision_rate(item_ids: list, sids: list) -> dict:
 # ---------------------------------------------------------------------------
 # Test 3: Per-level codebook entropy
 # ---------------------------------------------------------------------------
-def test_codebook_entropy(sids: list, codebook_width: int) -> dict:
+def test_codebook_entropy(sids: list, codebook_widths: list) -> dict:
     """
     Shannon entropy of the code distribution at each level.
-    Ideal (uniform): log2(codebook_width) bits.
+    Ideal (uniform): log2(codebook_widths[lvl]) bits.
     Low entropy → a few codes dominate, most are wasted.
     """
     _header("3. CODEBOOK ENTROPY  (distribution uniformity)")
     arr = np.array(sids, dtype=np.int64)
     num_levels = arr.shape[1]
-    max_entropy = np.log2(codebook_width)
-    print(f"  Max theoretical entropy: {max_entropy:.3f} bits  (uniform distribution)")
     results = {}
     for lvl in range(num_levels):
-        counts = np.bincount(arr[:, lvl], minlength=codebook_width).astype(float)
+        width = codebook_widths[lvl]
+        max_entropy = np.log2(width)
+        counts = np.bincount(arr[:, lvl], minlength=width).astype(float)
         probs = counts / counts.sum()
         probs_nz = probs[probs > 0]
         entropy = float(-np.sum(probs_nz * np.log2(probs_nz)))
         efficiency = entropy / max_entropy
         flag = "✓" if efficiency >= 0.7 else "⚠ LOW"
-        print(f"  Level {lvl}: entropy={entropy:.3f} bits  efficiency={efficiency:.1%}  {flag}")
+        print(f"  Level {lvl}: entropy={entropy:.3f} bits  max={max_entropy:.3f}  efficiency={efficiency:.1%}  {flag}")
         results[lvl] = {"entropy": entropy, "efficiency": efficiency}
     return results
 
@@ -143,19 +150,20 @@ def test_codebook_entropy(sids: list, codebook_width: int) -> dict:
 # ---------------------------------------------------------------------------
 # Test 4: Theoretical vs actual SID coverage
 # ---------------------------------------------------------------------------
-def test_coverage(sids: list, codebook_width: int) -> dict:
+def test_coverage(sids: list, codebook_widths: list) -> dict:
     """
-    Out of codebook_width^num_levels possible SID tuples, how many are used?
+    Out of prod(codebook_widths) possible SID tuples, how many are used?
     Also reports the ratio unique_SIDs / num_items (effective uniqueness).
     """
     _header("4. SID COVERAGE")
     arr = np.array(sids, dtype=np.int64)
     N, num_levels = arr.shape
-    theoretical_max = codebook_width ** num_levels
+    import math
+    theoretical_max = math.prod(codebook_widths)
     unique_sids = len(set(map(tuple, sids)))
 
     print(f"  Num levels:               {num_levels}")
-    print(f"  Codebook width:           {codebook_width}")
+    print(f"  Codebook widths:          {codebook_widths}")
     print(f"  Theoretical capacity:     {theoretical_max:>20,}")
     print(f"  Items:                    {N:>20,}")
     print(f"  Unique SIDs used:         {unique_sids:>20,}")
@@ -279,8 +287,9 @@ def main():
         help="Path to merged_predictions.pkl"
     )
     parser.add_argument(
-        "--codebook_width", type=int, default=256,
-        help="Number of codes per codebook level (default: 256)"
+        "--codebook_widths", type=str, default="256",
+        help="Codebook width per level. Single int applies to all levels; "
+             "comma-separated for per-layer widths, e.g. '1024,2048,2048' (default: 256)"
     )
     parser.add_argument(
         "--key_name", type=str, default="item_id",
@@ -303,12 +312,24 @@ def main():
     print(f"\nLoading SIDs from: {pkl_path}")
     item_ids, sids = load_sids(str(pkl_path), args.key_name, args.sid_name)
     num_levels = len(sids[0]) if sids else 0
-    print(f"Loaded {len(item_ids):,} items  |  {num_levels} SID levels per item  |  codebook_width={args.codebook_width}")
 
-    test_active_ratio(sids, args.codebook_width)
+    # Parse codebook widths: single int → broadcast to all levels; CSV → per-level list
+    raw_widths = [int(w.strip()) for w in args.codebook_widths.split(",")]
+    if len(raw_widths) == 1:
+        codebook_widths = raw_widths * num_levels
+    else:
+        if len(raw_widths) != num_levels:
+            raise ValueError(
+                f"--codebook_widths has {len(raw_widths)} values but SIDs have {num_levels} levels"
+            )
+        codebook_widths = raw_widths
+
+    print(f"Loaded {len(item_ids):,} items  |  {num_levels} SID levels per item  |  codebook_widths={codebook_widths}")
+
+    test_active_ratio(sids, codebook_widths)
     test_collision_rate(item_ids, sids)
-    test_codebook_entropy(sids, args.codebook_width)
-    test_coverage(sids, args.codebook_width)
+    test_codebook_entropy(sids, codebook_widths)
+    test_coverage(sids, codebook_widths)
     test_level_independence(sids)
     test_item_integrity(item_ids, sids)
 

@@ -1,0 +1,79 @@
+
+Loading SIDs from: /scratch/yw8866/logs/inference/runs/2026-05-06/2048_1024/pickle/merged_predictions.pkl
+Loaded 5,409,793 items  |  3 SID levels per item  |  codebook_widths=[2048, 1024, 1024]
+
+============================================================
+1. ACTIVE RATIO TEST  (index collapse detection)
+============================================================
+  Level 0: 2046/2048 codes active  (99.9%)  ✓
+  Level 1: 1024/1024 codes active  (100.0%)  ✓
+  Level 2: 1024/1024 codes active  (100.0%)  ✓
+
+============================================================
+2. COLLISION RATE TEST
+============================================================
+  Total items:             5,409,793
+  Unique SID tuples:       4,157,533
+  Collision rate:             36.21%
+  SID tuples w/ collisions:  706,889
+  Items in any collision:  1,959,149  (36.21%)
+  Largest collision group: 152 items share the same SID
+  Top-5 collision sizes:   [152, 144, 120, 118, 111]
+  Collision size distribution (size: count):
+    2 items sharing same SID: 471,174 groups
+    3 items sharing same SID: 128,226 groups
+    4 items sharing same SID: 49,052 groups
+    5 items sharing same SID: 22,568 groups
+    6 items sharing same SID: 12,262 groups
+    7 items sharing same SID: 7,091 groups
+    8 items sharing same SID: 4,491 groups
+    9 items sharing same SID: 2,913 groups
+    10 items sharing same SID: 2,110 groups
+    11 items sharing same SID: 1,469 groups
+
+============================================================
+3. CODEBOOK ENTROPY  (distribution uniformity)
+============================================================
+  Level 0: entropy=10.593 bits  max=11.000  efficiency=96.3%  ✓
+  Level 1: entropy=9.903 bits  max=10.000  efficiency=99.0%  ✓
+  Level 2: entropy=9.554 bits  max=10.000  efficiency=95.5%  ✓
+
+============================================================
+4. SID COVERAGE
+============================================================
+  Num levels:               3
+  Codebook widths:          [2048, 1024, 1024]
+  Theoretical capacity:            2,147,483,648
+  Items:                               5,409,793
+  Unique SIDs used:                    4,157,533
+  Uniqueness (unique/items): 0.7685
+  Capacity utilisation:      1.94e-03
+
+============================================================
+5. LEVEL INDEPENDENCE  (inter-level correlation)
+============================================================
+  Level 0 vs Level 1: identical code rate = 0.05%  ✓ independent
+  Level 0 vs Level 2: identical code rate = 0.06%  ✓ independent
+  Level 1 vs Level 2: identical code rate = 0.11%  ✓ independent
+
+============================================================
+6. ITEM INTEGRITY CHECK  (duplicate item IDs)
+============================================================
+  Total entries:             5,409,793
+  Unique item IDs:           5,409,793
+  Items with multiple SIDs: ✓ none
+
+============================================================
+CONVERTING TO .pt TENSOR
+============================================================
+  Items loaded:          5,409,793
+  max_item_id:           8,133,507
+  num_hierarchies:       3
+  Tensor shape (before T): (8133508, 3)
+  Saved: /scratch/yw8866/logs/inference/runs/2026-05-06/2048_1024/pickle/semantic_ids.pt
+  Final shape: (3, 8133508)  (186.2 MB)
+
+============================================================
+VERIFICATION COMPLETE
+semantic_ids.pt written to: /scratch/yw8866/logs/inference/runs/2026-05-06/2048_1024/pickle/semantic_ids.pt
+============================================================

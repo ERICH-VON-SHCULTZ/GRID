@@ -3,12 +3,12 @@
 #SBATCH --account=torch_pr_69_tandon_advanced
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH -c 8
+#SBATCH -c 20
 #SBATCH --time=24:00:00
 #SBATCH --mem=200GB
-#SBATCH --gres=gpu:h100:1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --job-name=train_tiger_t5
-#SBATCH --output=/scratch/yw8866/GRID/expoutfile/train_tiger_t5_1024.out
+#SBATCH --output=/scratch/yw8866/GRID/expoutfile/tiger_t5_1024_mdsid.out
 
 module purge
 
@@ -23,9 +23,10 @@ export HF_HOME=/scratch/yw8866/hf_cache
 export WANDB_API_KEY='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'
 export WANDB_PROJECT='MMMBGRec'
 export WANDB_INSECURE_DISABLE_SSL=true
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 python /scratch/yw8866/GRID/src/train.py experiment=tiger_train_flat \
     data_dir=/scratch/yw8866/rec-tmall/tfrecords \
-    semantic_id_path=/scratch/yw8866/logs/inference/runs/2026-04-29/tiger_1024/pickle/semantic_ids.pt \
+    semantic_id_path=/scratch/yw8866/logs/inference/runs/2026-04-28/v0/pickle/semantic_ids.pt \
     num_hierarchies=3
 "

@@ -279,6 +279,140 @@ def collate_fn_train(
     return model_input_data, model_label_data  # type: ignore
 
 
+def collate_with_behavior_sid_causal_duplicate(
+    batch: Union[List[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]],
+    sequence_field_name: str,
+    behavior_field_name: str,
+    sid_hierarchy: int,
+    labels: Dict[str, callable],  # type: ignore
+    sequence_length: int = 200,
+    masking_token: int = 1,
+    padding_token: int = 0,
+    oov_token: Optional[int] = None,
+    max_batch_size: int = 128,
+) -> Tuple[SequentialModelInputData, SequentialModuleLabelData]:
+    """Causal data-augmentation collate for multi-behavior sequences.
+
+    Interleaves behavior tokens and SID tokens so each item becomes
+    ``[behavior_token, SID_L1, ..., SID_LH]`` (stride = 1 + sid_hierarchy).
+    The behavior_data field is removed from the output batch; the interleaved
+    tokens live entirely in sequence_field_name.
+
+    The label function (NextKTokenMasking with next_k=1+sid_hierarchy) should
+    be declared in the ``labels`` dict for sequence_field_name.
+    """
+    if isinstance(batch, list):
+        batch = combine_list_of_tensor_dicts(batch)  # type: ignore
+
+    stride_sid = sid_hierarchy  # tokens per item in the SID-only sequence
+    stride_mb = 1 + sid_hierarchy  # tokens per item in the interleaved sequence
+
+    # count total contiguous sub-sequences across the batch
+    total_num_seqs = torch.sum(
+        (
+            (
+                k := torch.tensor([s.shape[0] for s in batch[sequence_field_name]])
+                // stride_sid
+            )
+            - 1
+        )
+        * k
+        // 2
+    )
+
+    if total_num_seqs > max_batch_size:
+        select_seqs = torch.randint(low=0, high=total_num_seqs, size=(max_batch_size,))
+    else:
+        select_seqs = torch.arange(total_num_seqs)
+
+    # build new batch — drop behavior_field_name, sequence will be interleaved
+    extra_fields = [f for f in batch if f not in (sequence_field_name, behavior_field_name)]
+    new_batch: Dict[str, list] = {sequence_field_name: []}
+    for f in extra_fields:
+        new_batch[f] = []
+
+    current_idx = 0
+    for row_index, sids in enumerate(batch[sequence_field_name]):
+        bhvs: torch.Tensor = batch[behavior_field_name][row_index]
+        # sids shape: (N * stride_sid,), bhvs shape: (N,)
+        N = sids.shape[0] // stride_sid
+
+        end_indices = torch.arange(2 * stride_sid, sids.shape[0] + 1, stride_sid)
+        for end_index in end_indices:
+            start_indices = torch.arange(0, end_index - 2 * stride_sid + 1, stride_sid)
+            for start_index in start_indices:
+                if current_idx in select_seqs:
+                    s_item = int(start_index) // stride_sid
+                    e_item = int(end_index) // stride_sid
+                    # interleave: [bhv_i, SID_i_L1, ..., SID_i_LH] for each item i
+                    pieces = []
+                    for i in range(s_item, e_item):
+                        pieces.append(bhvs[i : i + 1])
+                        pieces.append(sids[i * stride_sid : (i + 1) * stride_sid])
+                    interleaved = torch.cat(pieces)  # shape: ((e_item-s_item)*stride_mb,)
+                    new_batch[sequence_field_name].append(interleaved)
+                    for f in extra_fields:
+                        new_batch[f].append(batch[f][row_index])
+                current_idx += 1
+
+    return collate_fn_train(
+        batch=new_batch,
+        labels=labels,
+        sequence_length=sequence_length,
+        masking_token=masking_token,
+        padding_token=padding_token,
+        oov_token=oov_token,
+    )
+
+
+def collate_with_behavior_interleave(
+    batch: Union[List[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]],
+    sequence_field_name: str,
+    behavior_field_name: str,
+    sid_hierarchy: int,
+    labels: Dict[str, callable],  # type: ignore
+    sequence_length: int = 200,
+    masking_token: int = 1,
+    padding_token: int = 0,
+    oov_token: Optional[int] = None,
+) -> Tuple[SequentialModelInputData, SequentialModuleLabelData]:
+    """Interleave behavior tokens into SID sequences without data augmentation.
+
+    Used for val/test dataloaders where we evaluate on the full sequence
+    (no causal windowing).  behavior_data is removed from the output batch.
+    """
+    if isinstance(batch, list):
+        batch = combine_list_of_tensor_dicts(batch)  # type: ignore
+
+    stride_sid = sid_hierarchy
+
+    extra_fields = [f for f in batch if f not in (sequence_field_name, behavior_field_name)]
+    new_batch: Dict[str, list] = {sequence_field_name: []}
+    for f in extra_fields:
+        new_batch[f] = []
+
+    for row_index, sids in enumerate(batch[sequence_field_name]):
+        bhvs: torch.Tensor = batch[behavior_field_name][row_index]
+        N = sids.shape[0] // stride_sid
+        pieces = []
+        for i in range(N):
+            pieces.append(bhvs[i : i + 1])
+            pieces.append(sids[i * stride_sid : (i + 1) * stride_sid])
+        interleaved = torch.cat(pieces)
+        new_batch[sequence_field_name].append(interleaved)
+        for f in extra_fields:
+            new_batch[f].append(batch[f][row_index])
+
+    return collate_fn_train(
+        batch=new_batch,
+        labels=labels,
+        sequence_length=sequence_length,
+        masking_token=masking_token,
+        padding_token=padding_token,
+        oov_token=oov_token,
+    )
+
+
 def collate_fn_items(
     # batch can be a list or a dict
     batch: Union[List[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]],

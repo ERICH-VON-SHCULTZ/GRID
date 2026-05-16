@@ -312,3 +312,144 @@ class SIDRetrievalEvaluator(Evaluator):
                 target.to(preds.device),
                 indexes=expanded_indexes.to(preds.device),
             )
+
+
+class BehaviorAccuracy(CustomMeanReductionMetric):
+    """Tracks per-batch behavior prediction accuracy (correct / total)."""
+
+    def update(self, correct: int, total: int) -> None:
+        self.metric_values += correct
+        self.total_values += total
+
+
+class MultiBehaviorSIDRetrievalEvaluator(Evaluator):
+    """
+    Evaluator for multi-behavior TIGER.  Expects generated_ids of shape
+    (B, top_k, 1+H) where [:,:,0] is the predicted behavior and [:,:,1:]
+    are the predicted SID levels.  Labels shape: (B, 1+H).
+
+    Metric names use underscores (safe for nn.Module registration):
+        t1_ndcg_K, t1_recall_K  — GT behavior == buy → SID HR/NDCG
+        t2_ndcg_K, t2_recall_K  — conditioned on GT behavior → SID HR/NDCG
+        t3_ndcg_K, t3_recall_K  — free generation → joint (behavior+SID) HR/NDCG
+        t3_behavior_accuracy     — free generation → behavior prediction accuracy
+    """
+
+    def __init__(
+        self,
+        metrics: Dict[str, CustomRetrievalMetric],
+        top_k_list: List[int],
+        buy_behavior_id: int = 3,
+    ):
+        def _make(prefix, name, obj):
+            return {
+                f"{prefix}_{name}_{k}": obj(top_k=k, sync_on_compute=False, compute_with_cache=False)
+                for k in top_k_list
+            }
+
+        all_metrics: Dict[str, Any] = {}
+        for track in ("t1", "t2", "t3"):
+            all_metrics.update(_make(track, "ndcg", metrics["ndcg"]))
+            all_metrics.update(_make(track, "recall", metrics["recall"]))
+        all_metrics["t3_behavior_accuracy"] = BehaviorAccuracy(
+            sync_on_compute=False, compute_with_cache=False
+        )
+
+        self.buy_behavior_id = buy_behavior_id
+        self.metrics = all_metrics
+
+    def _update_retrieval(
+        self,
+        track: str,
+        marginal_probs: torch.Tensor,
+        generated_sids: torch.Tensor,
+        gt_sids: torch.Tensor,
+    ):
+        """
+        Args:
+            track:           "t1", "t2", or "t3"
+            marginal_probs:  (B, top_k)
+            generated_sids:  (B, top_k, H)  — SID columns only
+            gt_sids:         (B, H)
+        """
+        batch_size, num_candidates, num_h = generated_sids.shape
+        labels = gt_sids.reshape(batch_size, 1, num_h)
+        preds = marginal_probs.reshape(-1)
+
+        matched = torch.all((generated_sids == labels), dim=2).nonzero()
+        target = torch.zeros(batch_size, num_candidates, dtype=torch.bool,
+                             device=generated_sids.device)
+        if matched.numel() > 0:
+            target[matched[:, 0], matched[:, 1]] = True
+        target = target.reshape(-1)
+
+        expanded_indexes = (
+            torch.arange(batch_size, device=generated_sids.device)
+            .unsqueeze(-1)
+            .expand(batch_size, num_candidates)
+            .reshape(-1)
+        )
+
+        for key, metric_object in self.metrics.items():
+            if key.startswith(track) and not key.endswith("accuracy"):
+                metric_object.update(
+                    preds,
+                    target.to(preds.device),
+                    indexes=expanded_indexes.to(preds.device),
+                )
+
+    def __call__(
+        self,
+        marginal_probs: torch.Tensor,
+        generated_ids: torch.Tensor,
+        labels: torch.Tensor,
+        marginal_probs_t2: torch.Tensor,
+        generated_ids_t2: torch.Tensor,
+    ):
+        """
+        Args:
+            marginal_probs:    (B, top_k)
+            generated_ids:     (B, top_k, 1+H)
+            labels:            (B, 1+H)  labels[:,0]=GT behavior, labels[:,1:]=GT SIDs
+            marginal_probs_t2: (B, top_k)
+            generated_ids_t2:  (B, top_k, H)  SIDs only (behavior conditioned)
+        """
+        batch_size = labels.size(0)
+        gt_behavior = labels[:, 0]        # (B,)
+        gt_sids = labels[:, 1:]           # (B, H)
+
+        pred_behavior = generated_ids[:, :, 0]   # (B, top_k)
+        pred_sids = generated_ids[:, :, 1:]      # (B, top_k, H)
+
+        # ---- Track 1: GT behavior == buy ----
+        buy_mask = (gt_behavior == self.buy_behavior_id)
+        if buy_mask.any():
+            self._update_retrieval("t1", marginal_probs[buy_mask], pred_sids[buy_mask], gt_sids[buy_mask])
+
+        # ---- Track 2: conditioned on GT behavior ----
+        self._update_retrieval("t2", marginal_probs_t2, generated_ids_t2, gt_sids)
+
+        # ---- Track 3: joint behavior+SID HR/NDCG ----
+        behavior_match = (pred_behavior == gt_behavior.unsqueeze(1))   # (B, top_k)
+        sid_match = torch.all((pred_sids == gt_sids.unsqueeze(1)), dim=2)  # (B, top_k)
+        joint_match = (behavior_match & sid_match).reshape(-1)
+        preds_flat = marginal_probs.reshape(-1)
+        expanded_indexes = (
+            torch.arange(batch_size, device=labels.device)
+            .unsqueeze(-1)
+            .expand(batch_size, generated_ids.size(1))
+            .reshape(-1)
+        )
+        for key, metric_object in self.metrics.items():
+            if key.startswith("t3") and not key.endswith("accuracy"):
+                metric_object.update(
+                    preds_flat,
+                    joint_match.to(preds_flat.device),
+                    indexes=expanded_indexes.to(preds_flat.device),
+                )
+
+        # ---- Track 3: behavior accuracy (best beam) ----
+        best_beam = marginal_probs.argmax(dim=-1)  # (B,)
+        best_pred = pred_behavior[torch.arange(batch_size, device=pred_behavior.device), best_beam]
+        correct = int((best_pred == gt_behavior).sum().item())
+        self.metrics["t3_behavior_accuracy"].update(correct, batch_size)

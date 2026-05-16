@@ -3,17 +3,23 @@
 #
 # Required overrides (must be supplied on the command line):
 #   items_dir=<folder containing the .txt file of item IDs>
-#   codebook_width=<int, must match training — e.g. 256>
+#   codebook_width_l1=<int, must match training — layer 1 shared codebook>
+#   codebook_width_l2=<int, must match training — layer 2 text codebook>
+#   codebook_width_l3=<int, must match training — layer 3 image codebook>
 #   ckpt_path=<path to the .ckpt file>
 #
 # Launch example:
 #   python src/inference.py experiment=md_rqvae_inference_flat \
 #       items_dir=/scratch/yw8866/rec-tmall/image_sqf \
-#       codebook_width=256 \
-#       ckpt_path=/scratch/yw8866/logs/train/runs/2026-04-26/mdrqvae_1e_256/checkpoints/checkpoint_000_005000.ckpt
+#       codebook_width_l1=1024 \
+#       codebook_width_l2=2048 \
+#       codebook_width_l3=2048 \
+#       ckpt_path=/scratch/yw8866/logs/train/runs/.../checkpoints/checkpoint_000_005000.ckpt
 
 items_dir: ???
-codebook_width: ???
+codebook_width_l1: ???
+codebook_width_l2: ???
+codebook_width_l3: ???
 ckpt_path: ???
 
 data_dir: ${items_dir}
@@ -168,7 +174,7 @@ model:
 
   shared_codebook:
     _target_: src.modules.clustering.vector_quantization.EMAVectorQuantization
-    n_clusters: ${codebook_width}
+    n_clusters: ${codebook_width_l1}
     n_features: ${latent_dim}
     ema_decay: 0.99
     dead_code_threshold: 1.0
@@ -187,7 +193,7 @@ model:
 
   text_codebook:
     _target_: src.modules.clustering.vector_quantization.EMAVectorQuantization
-    n_clusters: ${codebook_width}
+    n_clusters: ${codebook_width_l2}
     n_features: ${latent_dim}
     ema_decay: 0.99
     dead_code_threshold: 1.0
@@ -206,7 +212,7 @@ model:
 
   image_codebook:
     _target_: src.modules.clustering.vector_quantization.EMAVectorQuantization
-    n_clusters: ${codebook_width}
+    n_clusters: ${codebook_width_l3}
     n_features: ${latent_dim}
     ema_decay: 0.99
     dead_code_threshold: 1.0

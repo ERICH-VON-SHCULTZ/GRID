@@ -1110,3 +1110,417 @@ class T5MultiLayerFF(nn.Module):
         forwarded_states = self.mlp(forwarded_states)
         hidden_states = hidden_states + self.dropout(forwarded_states)
         return hidden_states
+
+
+class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
+    """
+    Multi-behavior TIGER model.
+
+    Extends SemanticIDEncoderDecoder so that each item in the sequence is
+    represented by (1 + num_hierarchies) tokens:
+        [behavior_token, SID_L1, SID_L2, ..., SID_LH]
+
+    The embedding table is extended by num_behaviors slots placed at indices
+    [H * num_embeddings_per_hierarchy, ..., H * num_embeddings_per_hierarchy + num_behaviors).
+
+    Decoder produces num_hierarchies + 1 predictions per item:
+        position 0 → behavior class  (via behavior_mlp)
+        position h+1 → SID level h   (via decoder_mlp[h])
+
+    Evaluation tracks (reported via MultiBehaviorSIDRetrievalEvaluator):
+        Track 1: GT behavior == buy → SID HR/NDCG
+        Track 2: Conditioned on GT behavior → SID HR/NDCG
+        Track 3: Free generation → behavior accuracy + joint HR/NDCG
+    """
+
+    def __init__(
+        self,
+        num_behaviors: int = 4,
+        buy_behavior_id: int = 3,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+
+        self.num_behaviors = num_behaviors
+        self.buy_behavior_id = buy_behavior_id
+        # offset added to raw behavior indices so they land in the extended embedding table
+        self.behavior_offset = self.num_hierarchies * self.num_embeddings_per_hierarchy
+
+        # extend the embedding table to accommodate behavior slots
+        old_weight = self.item_sid_embedding_table_encoder.weight.data.clone()
+        new_table = torch.nn.Embedding(
+            self.behavior_offset + num_behaviors,
+            self.embedding_dim,
+        )
+        with torch.no_grad():
+            new_table.weight[: self.behavior_offset] = old_weight
+        self.item_sid_embedding_table_encoder = new_table
+
+        # linear head that predicts the behavior type
+        self.behavior_mlp = torch.nn.Linear(self.embedding_dim, num_behaviors, bias=False)
+
+    # ------------------------------------------------------------------
+    # Offset helpers
+    # ------------------------------------------------------------------
+
+    def _mb_offset_pattern(self, num_cols: int, device: torch.device) -> torch.Tensor:
+        """(1+H)-periodic offset pattern: [H*cbs, 0, cbs, 2*cbs, H*cbs, ...]"""
+        cbs = self.num_embeddings_per_hierarchy
+        period = [self.behavior_offset] + [h * cbs for h in range(self.num_hierarchies)]
+        stride = 1 + self.num_hierarchies
+        num_repeats = (num_cols + stride - 1) // stride
+        return torch.tensor(period * num_repeats, dtype=torch.long, device=device)[:num_cols]
+
+    # ------------------------------------------------------------------
+    # Forward pass overrides
+    # ------------------------------------------------------------------
+
+    def encoder_forward_pass(
+        self,
+        attention_mask: torch.Tensor,
+        input_ids: torch.Tensor,
+        user_id: torch.Tensor,
+    ) -> torch.Tensor:
+        # apply (1+H)-periodic offset instead of H-periodic
+        offsets = self._mb_offset_pattern(input_ids.shape[1], input_ids.device)
+        shifted = (input_ids + offsets) * attention_mask
+        inputs_embeds = self.get_embedding_table("encoder")(shifted)
+
+        if self.sep_token is not None:
+            inputs_embeds, attention_mask = self._inject_sep_token_between_sids(
+                id_embeddings=inputs_embeds,
+                attention_mask=attention_mask,
+                sep_token=self.sep_token,
+                num_hierarchies=(1 + self.num_hierarchies),
+            )
+
+        if user_id is not None and self.user_embedding is not None:
+            user_id = user_id[:, 0]
+            user_embeds = self.user_embedding(
+                torch.remainder(user_id, self.user_embedding.num_embeddings)
+            )
+            inputs_embeds = torch.cat([user_embeds.unsqueeze(1), inputs_embeds], dim=1)
+            attention_mask = torch.cat(
+                [torch.ones(attention_mask.size(0), 1, device=attention_mask.device),
+                 attention_mask],
+                dim=1,
+            )
+
+        encoder_output = self.encoder(
+            sequence_embedding=inputs_embeds,
+            attention_mask=attention_mask,
+        )
+        return encoder_output, attention_mask
+
+    def decoder_forward_pass(
+        self,
+        attention_mask: Optional[torch.Tensor] = None,
+        future_ids: Optional[torch.Tensor] = None,
+        encoder_output: Optional[torch.Tensor] = None,
+        attention_mask_for_encoder: Optional[torch.Tensor] = None,
+        use_cache: bool = False,
+        past_key_values=None,
+    ) -> torch.Tensor:
+        if future_ids is not None:
+            offsets = self._mb_offset_pattern(future_ids.shape[1], future_ids.device)
+            ones_mask = torch.ones_like(future_ids)
+            shifted_future = future_ids + offsets
+            shifted_future = shifted_future * ones_mask
+            inputs_embeds = self.get_embedding_table("decoder")(shifted_future)
+
+            if not self._is_kv_cache_valid(kv_cache=past_key_values):
+                inputs_embeds = torch.cat(
+                    [self.decoder.bos_token.unsqueeze(0).expand(future_ids.size(0), 1, -1),
+                     inputs_embeds],
+                    dim=1,
+                )
+                if attention_mask is not None:
+                    attention_mask = torch.cat(
+                        [torch.ones(future_ids.size(0), 1, device=future_ids.device),
+                         attention_mask],
+                        dim=1,
+                    )
+            else:
+                inputs_embeds = inputs_embeds[:, -1:, :]
+        else:
+            inputs_embeds = self.decoder.bos_token.unsqueeze(0).expand(
+                encoder_output.size(0), 1, -1
+            )
+
+        return self.decoder(
+            sequence_embedding=inputs_embeds,
+            attention_mask=attention_mask,
+            encoder_attention_mask=attention_mask_for_encoder,
+            encoder_output=encoder_output,
+            use_cache=use_cache,
+            past_key_values=past_key_values,
+        )
+
+    # ------------------------------------------------------------------
+    # Generation
+    # ------------------------------------------------------------------
+
+    def generate_multibehavior(
+        self,
+        attention_mask: torch.Tensor,
+        input_ids: torch.Tensor,
+        user_id: torch.Tensor = None,
+    ):
+        """
+        Beam-search generation that produces (1 + num_hierarchies) tokens per item:
+            [:, :, 0]   = predicted behavior
+            [:, :, 1:]  = predicted SID levels
+
+        Returns:
+            generated_ids:   (B, top_k, 1+H)
+            marginal_probs:  (B, top_k)
+        """
+        encoder_output, encoder_attention_mask = self.encoder_forward_pass(
+            attention_mask=attention_mask,
+            input_ids=input_ids,
+            user_id=user_id,
+        )
+
+        batch_size = input_ids.size(0)
+        past_key_values = EncoderDecoderCache(
+            self_attention_cache=DynamicCache(),
+            cross_attention_cache=DynamicCache(),
+        )
+
+        # ---- step 0: predict behavior (no previous generated tokens) ----
+        decoder_output, past_key_values = self.decoder_forward_pass(
+            future_ids=None,
+            encoder_output=encoder_output,
+            attention_mask_for_encoder=encoder_attention_mask,
+            use_cache=True,
+            past_key_values=past_key_values,
+        )
+        behavior_logits = self.behavior_mlp(decoder_output[:, -1, :])  # (B, num_behaviors)
+
+        # top-k over behavior (small vocab — simple selection, no prefix check)
+        top_k_b = min(self.top_k_for_generation, self.num_behaviors)
+        behavior_probs = torch.nn.functional.softmax(behavior_logits, dim=-1)
+        proba_topk, idx_topk = torch.topk(behavior_probs, top_k_b, dim=-1)  # (B, top_k_b)
+
+        generated_ids = idx_topk.unsqueeze(-1)      # (B, top_k_b, 1)
+        marginal_log_prob = proba_topk               # (B, top_k_b)
+
+        # Pad to top_k_for_generation so the SID loop always sees exactly top_k beams.
+        # Padded beams carry probability 0 and can never win any topk selection.
+        if top_k_b < self.top_k_for_generation:
+            pad = self.top_k_for_generation - top_k_b
+            generated_ids = torch.cat(
+                [generated_ids, generated_ids.new_zeros(batch_size, pad, 1)], dim=1
+            )
+            marginal_log_prob = torch.cat(
+                [marginal_log_prob, torch.zeros(batch_size, pad, device=marginal_log_prob.device)],
+                dim=1,
+            )
+
+        # reset cache after expanding beams from B → B*top_k
+        past_key_values = EncoderDecoderCache(
+            self_attention_cache=DynamicCache(),
+            cross_attention_cache=DynamicCache(),
+        )
+
+        # ---- steps 1..H: predict SID levels ----
+        for hierarchy in range(self.num_hierarchies):
+            step = hierarchy + 1  # position in the (1+H)-token block
+            squeezed = generated_ids.reshape(-1, step)  # (B*top_k, step)
+
+            repeated_encoder_output = encoder_output.repeat_interleave(
+                self.top_k_for_generation, dim=0
+            )
+            repeated_encoder_mask = encoder_attention_mask.repeat_interleave(
+                self.top_k_for_generation, dim=0
+            )
+
+            decoder_output, past_key_values = self.decoder_forward_pass(
+                future_ids=squeezed,
+                encoder_output=repeated_encoder_output,
+                attention_mask_for_encoder=repeated_encoder_mask,
+                use_cache=True,
+                past_key_values=past_key_values,
+            )
+
+            candidate_logits = self.decoder.decoder_mlp[hierarchy](
+                decoder_output[:, -1, :]
+            )  # (B*top_k, num_embeddings_per_hierarchy)
+
+            generated_ids, marginal_log_prob, past_key_values = self._beam_search_one_step(
+                candidate_logits=candidate_logits,
+                generated_ids=generated_ids,
+                marginal_log_prob=marginal_log_prob,
+                past_key_values=past_key_values,
+                hierarchy=step,
+                batch_size=batch_size,
+            )
+
+        return generated_ids, marginal_log_prob  # (B, top_k, 1+H), (B, top_k)
+
+    def generate_conditioned(
+        self,
+        attention_mask: torch.Tensor,
+        input_ids: torch.Tensor,
+        gt_behavior: torch.Tensor,
+        user_id: torch.Tensor = None,
+    ):
+        """
+        Track-2 generation: force the behavior token to gt_behavior, then beam-search SIDs.
+
+        Args:
+            gt_behavior: (B,) long tensor of GT behavior indices.
+
+        Returns:
+            generated_ids:  (B, top_k, H)  — SIDs only (no behavior prefix)
+            marginal_probs: (B, top_k)
+        """
+        encoder_output, encoder_attention_mask = self.encoder_forward_pass(
+            attention_mask=attention_mask,
+            input_ids=input_ids,
+            user_id=user_id,
+        )
+
+        batch_size = input_ids.size(0)
+        past_key_values = EncoderDecoderCache(
+            self_attention_cache=DynamicCache(),
+            cross_attention_cache=DynamicCache(),
+        )
+
+        # seed generated_ids with the GT behavior — shape (B, 1, 1)
+        generated_ids = gt_behavior.unsqueeze(-1).unsqueeze(-1).expand(
+            batch_size, self.top_k_for_generation, 1
+        )  # (B, top_k, 1)
+        marginal_log_prob = torch.ones(
+            batch_size, self.top_k_for_generation, device=gt_behavior.device
+        )  # uniform — behavior is given
+
+        # SID beam search (steps 1..H), same as generate_multibehavior after step 0
+        for hierarchy in range(self.num_hierarchies):
+            step = hierarchy + 1
+            squeezed = generated_ids.reshape(-1, step)  # (B*top_k, step)
+
+            repeated_encoder_output = encoder_output.repeat_interleave(
+                self.top_k_for_generation, dim=0
+            )
+            repeated_encoder_mask = encoder_attention_mask.repeat_interleave(
+                self.top_k_for_generation, dim=0
+            )
+
+            decoder_output, past_key_values = self.decoder_forward_pass(
+                future_ids=squeezed,
+                encoder_output=repeated_encoder_output,
+                attention_mask_for_encoder=repeated_encoder_mask,
+                use_cache=True,
+                past_key_values=past_key_values,
+            )
+
+            candidate_logits = self.decoder.decoder_mlp[hierarchy](
+                decoder_output[:, -1, :]
+            )
+
+            generated_ids, marginal_log_prob, past_key_values = self._beam_search_one_step(
+                candidate_logits=candidate_logits,
+                generated_ids=generated_ids,
+                marginal_log_prob=marginal_log_prob,
+                past_key_values=past_key_values,
+                hierarchy=step,
+                batch_size=batch_size,
+            )
+
+        # strip behavior prefix, return SIDs only
+        return generated_ids[:, :, 1:], marginal_log_prob  # (B, top_k, H), (B, top_k)
+
+    # ------------------------------------------------------------------
+    # Training / eval steps
+    # ------------------------------------------------------------------
+
+    def model_step(
+        self,
+        model_input: SequentialModelInputData,
+        label_data: Optional[SequentialModuleLabelData] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if label_data is None:
+            generated_ids, marginal_probs = self.generate_multibehavior(
+                attention_mask=model_input.mask,
+                **{
+                    self.feature_to_model_input_map.get(k, k): v
+                    for k, v in model_input.transformed_sequences.items()
+                },
+            )
+            return generated_ids, 0
+
+        fut_ids = None
+        for label in label_data.labels:
+            curr_label = label_data.labels[label]
+            fut_ids = curr_label.reshape(model_input.mask.size(0), -1)
+        # fut_ids shape: (B, 1 + num_hierarchies)
+
+        model_output = self.forward(
+            attention_mask_encoder=model_input.mask,
+            future_ids=fut_ids,
+            **{
+                self.feature_to_model_input_map.get(k, k): v
+                for k, v in model_input.transformed_sequences.items()
+            },
+        )
+        # Decoder receives [BOS, behavior, SID_L1, ..., SID_LH]; output shape (B, 2+H, embed_dim).
+        # Drop the last position (prediction for position after the last label).
+        model_output = model_output[:, :-1]  # (B, 1+H, embed_dim)
+
+        # behavior loss at position 0
+        behavior_logits = self.behavior_mlp(model_output[:, 0])  # (B, num_behaviors)
+        loss = self.loss_function(input=behavior_logits, target=fut_ids[:, 0].long())
+
+        # SID losses at positions 1..H
+        for hierarchy in range(self.num_hierarchies):
+            sid_logits = self.decoder.decoder_mlp[hierarchy](model_output[:, hierarchy + 1])
+            loss += self.loss_function(
+                input=sid_logits,
+                target=fut_ids[:, hierarchy + 1].long(),
+            )
+
+        return model_output, loss
+
+    def eval_step(
+        self,
+        batch: Tuple[SequentialModelInputData, SequentialModuleLabelData],
+        loss_to_aggregate,
+    ):
+        model_input: SequentialModelInputData = batch[0]
+        label_data: SequentialModuleLabelData = batch[1]
+        _, loss = self.model_step(model_input=model_input, label_data=label_data)
+
+        # free generation for Track 1 and Track 3
+        generated_ids, marginal_probs = self.generate_multibehavior(
+            attention_mask=model_input.mask,
+            **{
+                self.feature_to_model_input_map.get(k, k): v
+                for k, v in model_input.transformed_sequences.items()
+            },
+        )
+
+        labels = list(label_data.labels.values())[0].to(marginal_probs.device)
+        # labels shape: (B * (1+H),) flattened; reshape to (B, 1+H)
+        labels = labels.reshape(model_input.mask.size(0), -1)
+
+        # Track 2: conditioned generation
+        gt_behavior = labels[:, 0]
+        generated_ids_t2, marginal_probs_t2 = self.generate_conditioned(
+            attention_mask=model_input.mask,
+            gt_behavior=gt_behavior,
+            **{
+                self.feature_to_model_input_map.get(k, k): v
+                for k, v in model_input.transformed_sequences.items()
+            },
+        )
+
+        self.evaluator(
+            marginal_probs=marginal_probs,
+            generated_ids=generated_ids,
+            labels=labels,
+            marginal_probs_t2=marginal_probs_t2,
+            generated_ids_t2=generated_ids_t2,
+        )
+
+        loss_to_aggregate(loss)

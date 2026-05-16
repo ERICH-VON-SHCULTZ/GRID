@@ -1,0 +1,23 @@
+2026-05-08 16:35:14.520026: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-05-08 16:35:17.875751: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 AVX512_FP16 AVX_VNNI AMX_TILE AMX_INT8 AMX_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+Behavior map: {'pv': 0, 'fav': 1, 'cart': 2, 'buy': 3}
+
+Phase 1: Reading interaction logs...
+  Reading tianchi_2014002_rec_tmall_log_parta.txt ...
+    Rows so far: 370,450,743
+  Reading tianchi_2014002_rec_tmall_log_partb.txt ...
+    Rows so far: 740,726,167
+  Reading tianchi_2014002_rec_tmall_log_partc.txt ...
+    Rows so far: 1,097,552,816
+Total rows loaded: 1,097,552,816  (skipped malformed: 0)
+
+Phase 2: Sorting by (user_id, timestamp)...
+  Done.
+
+Phase 3: Writing TFRecord files...
+
+Done!
+  Users — train: 6,602,818  val: 826,334  test: 826,313  skipped (seq not in [5, 200]): 1,513,002
+  Files — train: 1,321  val: 166  test: 166
+  Output: /scratch/yw8866/rec-tmall/tfrecords_mb
