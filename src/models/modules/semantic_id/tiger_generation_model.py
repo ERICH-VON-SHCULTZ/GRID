@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 import torch
 import transformers
@@ -16,6 +16,7 @@ from src.data.loading.components.interfaces import (
 from src.models.components.interfaces import OneKeyPerPredictionOutput
 from src.models.components.network_blocks.mlp import MLP
 from src.models.modules.huggingface.transformer_base_module import TransformerBaseModule
+from src.utils.codebook_embedding_init import build_codebook_init_embedding
 from src.utils.utils import (
     delete_module,
     find_module_shape,
@@ -258,6 +259,7 @@ class SemanticIDGenerativeRecommender(TransformerBaseModule):
         past_key_values: Union[EncoderDecoderCache, None],
         hierarchy: int,
         batch_size: int,
+        num_emb_override: Optional[int] = None,
     ):
         """
         Perform one step of beam search.
@@ -274,12 +276,14 @@ class SemanticIDGenerativeRecommender(TransformerBaseModule):
             The updated generated IDs and the marginal probabilities.
         """
 
+        num_emb = num_emb_override if num_emb_override is not None else self.num_embeddings_per_hierarchy
+
         # pruning the beams that cannot be mapped to a valid item
         if self.should_check_prefix:
             if generated_ids is None:
                 valid_prefix_mask = self._check_valid_prefix(
                     torch.arange(
-                        self.num_embeddings_per_hierarchy,
+                        num_emb,
                         device=candidate_logits.device,
                     ).unsqueeze(1)
                 )
@@ -290,10 +294,10 @@ class SemanticIDGenerativeRecommender(TransformerBaseModule):
                     torch.cat(
                         [
                             generated_ids.reshape(-1, hierarchy).repeat_interleave(
-                                self.num_embeddings_per_hierarchy, dim=0
+                                num_emb, dim=0
                             ),
                             torch.arange(
-                                self.num_embeddings_per_hierarchy,
+                                num_emb,
                                 device=candidate_logits.device,
                             )
                             .repeat(self.top_k_for_generation * batch_size)
@@ -301,7 +305,7 @@ class SemanticIDGenerativeRecommender(TransformerBaseModule):
                         ],
                         dim=1,
                     )
-                ).reshape(-1, self.num_embeddings_per_hierarchy)
+                ).reshape(-1, num_emb)
             candidate_logits[~valid_prefix_mask] = float("-inf")
 
         candidate_logits = torch.nn.functional.softmax(candidate_logits, dim=-1)
@@ -325,18 +329,18 @@ class SemanticIDGenerativeRecommender(TransformerBaseModule):
         else:
             # we have beams, generating more beams from the existing beams
             proba, indices = (
-                proba[:, : self.num_embeddings_per_hierarchy],
-                indices[:, : self.num_embeddings_per_hierarchy],
+                proba[:, : num_emb],
+                indices[:, : num_emb],
             )
             proba, indices = proba.reshape(
-                -1, self.top_k_for_generation * self.num_embeddings_per_hierarchy
+                -1, self.top_k_for_generation * num_emb
             ), indices.reshape(
-                -1, self.top_k_for_generation * self.num_embeddings_per_hierarchy
+                -1, self.top_k_for_generation * num_emb
             )
             # calculating the marginal probability
             proba = torch.mul(
                 marginal_log_prob.repeat_interleave(
-                    self.num_embeddings_per_hierarchy, dim=-1
+                    num_emb, dim=-1
                 ),
                 proba,
             )
@@ -346,7 +350,7 @@ class SemanticIDGenerativeRecommender(TransformerBaseModule):
             proba_topk, indices_topk = topk_results.values, topk_results.indices
             # getting indices of winning beams in the original beams
             replace_indices = (
-                (indices_topk // self.num_embeddings_per_hierarchy)
+                (indices_topk // num_emb)
                 + torch.arange(indices_topk.size(0), device=proba.device).unsqueeze(1)
                 * self.top_k_for_generation
             ).flatten()
@@ -1112,6 +1116,101 @@ class T5MultiLayerFF(nn.Module):
         return hidden_states
 
 
+class BMTVEmbeddingWrapper(nn.Module):
+    """
+    Behavior-Modulated Triple-View embedding wrapper.
+
+    Converts a flat (B, N*(1+H)) token sequence into (B, 3N, d_model) by
+    building three strictly orthogonal views per item (shared, text, image),
+    gating them with a 3-way behavior gate, and injecting item-level positional
+    and modality-type encodings before the sequence enters the T5 encoder.
+
+    Assumes num_hierarchies == 3 with SID levels ordered:
+        L0 = shared (e_f),  L1 = text (e_t),  L2 = image (e_i)
+    """
+
+    def __init__(self, d_model: int, max_seq_len: int = 256) -> None:
+        super().__init__()
+        self.gating_net = nn.Linear(d_model, 3, bias=True)
+        self.item_pos_embedding = nn.Embedding(max_seq_len, d_model)
+        self.modality_type_embedding = nn.Embedding(3, d_model)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,        # (B, N*(1+H)) raw IDs
+        attention_mask: torch.Tensor,   # (B, N*(1+H))
+        embedding_table: nn.Embedding,
+        stride: int,                    # = 1 + num_hierarchies = 4
+        behavior_offset: int,
+        sid_level_offsets: List[int],   # [off_L0, off_L1, off_L2]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Returns:
+            inputs_embeds : (B, 3N, d_model)
+            encoder_mask  : (B, 3N)
+        """
+        B, L = input_ids.shape
+        N = L // stride
+
+        # Reshape into per-item groups: (B, N, stride)
+        ids = input_ids.reshape(B, N, stride)
+        item_mask = attention_mask.reshape(B, N, stride)[:, :, 0]  # (B, N)
+
+        # Clamp -1 padding tokens to 0 before adding offsets
+        b_ids = ids[:, :, 0].clamp(min=0)   # behavior
+        f_ids = ids[:, :, 1].clamp(min=0)   # SID L0 (shared)
+        t_ids = ids[:, :, 2].clamp(min=0)   # SID L1 (text)
+        i_ids = ids[:, :, 3].clamp(min=0)   # SID L2 (image)
+
+        # Global indices into the unified embedding table; 0 for padded items
+        b_global = (b_ids + behavior_offset)       * item_mask  # (B, N)
+        f_global = (f_ids + sid_level_offsets[0])  * item_mask
+        t_global = (t_ids + sid_level_offsets[1])  * item_mask
+        i_global = (i_ids + sid_level_offsets[2])  * item_mask
+
+        e_B = embedding_table(b_global)   # (B, N, d)
+        e_f = embedding_table(f_global)
+        e_t = embedding_table(t_global)
+        e_i = embedding_table(i_global)
+
+        # --- Step 1: Triple-view construction (orthogonal decoupling) ---
+        V_shared = e_f   # (B, N, d) — macro shared semantics
+        V_text   = e_t   # (B, N, d) — text-specific residual
+        V_img    = e_i   # (B, N, d) — image-specific residual
+
+        # --- Step 2: 3-way behavior gating ---
+        gate = torch.softmax(self.gating_net(e_B), dim=-1)  # (B, N, 3)
+        V_shared_g = gate[:, :, 0:1] * V_shared   # (B, N, d)
+        V_text_g   = gate[:, :, 1:2] * V_text     # (B, N, d)
+        V_img_g    = gate[:, :, 2:3] * V_img      # (B, N, d)
+
+        # --- Step 3: 3N sequence assembly + positional encoding ---
+        # [V_shared_1, V_text_1, V_img_1, V_shared_2, ...]  →  (B, 3N, d)
+        stacked     = torch.stack([V_shared_g, V_text_g, V_img_g], dim=2)  # (B, N, 3, d)
+        interleaved = stacked.reshape(B, 3 * N, -1)                         # (B, 3N, d)
+
+        # Item-level PE: all three views of item k share position k → 0,0,0,1,1,1,...
+        item_pos = (
+            torch.arange(N, device=input_ids.device)
+            .unsqueeze(0).expand(B, -1)
+            .repeat_interleave(3, dim=1)
+        )  # (B, 3N)
+        pos_emb = self.item_pos_embedding(item_pos)   # (B, 3N, d)
+
+        # Modality TE: 0=shared, 1=text, 2=image → repeating pattern 0,1,2,0,1,2,...
+        mod_ids = (
+            torch.arange(3 * N, device=input_ids.device) % 3
+        ).unsqueeze(0).expand(B, -1)  # (B, 3N)
+        mod_emb = self.modality_type_embedding(mod_ids)   # (B, 3N, d)
+
+        inputs_embeds = interleaved + pos_emb + mod_emb   # (B, 3N, d)
+
+        # Encoder mask: each item contributes 3 tokens
+        encoder_mask = item_mask.repeat_interleave(3, dim=1)   # (B, 3N)
+
+        return inputs_embeds, encoder_mask
+
+
 class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
     """
     Multi-behavior TIGER model.
@@ -1137,36 +1236,140 @@ class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
         self,
         num_behaviors: int = 4,
         buy_behavior_id: int = 3,
+        codebook_sizes: Optional[List[int]] = None,
+        codebook_init_path: Optional[str] = None,
+        use_bmtv: bool = False,
+        bmtv_max_seq_len: int = 256,
+        use_item_pe: bool = False,
+        item_pe_max_seq_len: int = 256,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
 
         self.num_behaviors = num_behaviors
         self.buy_behavior_id = buy_behavior_id
-        # offset added to raw behavior indices so they land in the extended embedding table
-        self.behavior_offset = self.num_hierarchies * self.num_embeddings_per_hierarchy
 
-        # extend the embedding table to accommodate behavior slots
-        old_weight = self.item_sid_embedding_table_encoder.weight.data.clone()
-        new_table = torch.nn.Embedding(
-            self.behavior_offset + num_behaviors,
-            self.embedding_dim,
-        )
-        with torch.no_grad():
-            new_table.weight[: self.behavior_offset] = old_weight
+        # ------------------------------------------------------------------
+        # Per-level codebook sizes and cumulative SID offsets
+        # ------------------------------------------------------------------
+        if codebook_sizes is not None:
+            if len(codebook_sizes) != self.num_hierarchies:
+                raise ValueError(
+                    f"codebook_sizes must have {self.num_hierarchies} entries, "
+                    f"got {len(codebook_sizes)}"
+                )
+            self.sid_level_sizes: List[int] = list(codebook_sizes)
+        else:
+            self.sid_level_sizes = [self.num_embeddings_per_hierarchy] * self.num_hierarchies
+
+        # cumulative base offsets per SID level: [0, K0, K0+K1, ...]
+        self.sid_level_offsets: List[int] = [
+            sum(self.sid_level_sizes[:h]) for h in range(self.num_hierarchies)
+        ]
+        # behavior tokens sit immediately after all SID entries
+        self.behavior_offset: int = sum(self.sid_level_sizes)
+        total_vocab = self.behavior_offset + num_behaviors
+
+        # ------------------------------------------------------------------
+        # Build / reinitialise the embedding table
+        # ------------------------------------------------------------------
+        if codebook_init_path is not None:
+            # Inject codebook geometry via orthogonal up-projection
+            e_init, detected_sizes = build_codebook_init_embedding(
+                checkpoint_path=codebook_init_path,
+                d_model=self.embedding_dim,
+                num_behaviors=num_behaviors,
+            )
+            if codebook_sizes is not None and list(codebook_sizes) != detected_sizes:
+                raise ValueError(
+                    f"codebook_sizes {codebook_sizes} does not match sizes "
+                    f"found in checkpoint {detected_sizes}"
+                )
+            # Sync sid_level_sizes in case codebook_sizes was None
+            self.sid_level_sizes = detected_sizes
+            self.sid_level_offsets = [
+                sum(self.sid_level_sizes[:h]) for h in range(self.num_hierarchies)
+            ]
+            self.behavior_offset = sum(self.sid_level_sizes)
+            total_vocab = self.behavior_offset + num_behaviors
+
+            new_table = torch.nn.Embedding(total_vocab, self.embedding_dim)
+            with torch.no_grad():
+                new_table.weight.copy_(e_init)
+        else:
+            # Random init: extend the existing table to fit the new vocab layout
+            new_table = torch.nn.Embedding(total_vocab, self.embedding_dim)
+            with torch.no_grad():
+                # Copy old SID entries level by level (old layout: h*old_cbs blocks)
+                old_cbs = self.num_embeddings_per_hierarchy
+                old_weight = self.item_sid_embedding_table_encoder.weight.data
+                for h, (old_off, new_off, k) in enumerate(
+                    zip(
+                        [h * old_cbs for h in range(self.num_hierarchies)],
+                        self.sid_level_offsets,
+                        self.sid_level_sizes,
+                    )
+                ):
+                    copy_k = min(k, old_cbs, old_weight.shape[0] - old_off)
+                    if copy_k > 0:
+                        new_table.weight[new_off : new_off + copy_k] = (
+                            old_weight[old_off : old_off + copy_k]
+                        )
+
         self.item_sid_embedding_table_encoder = new_table
 
-        # linear head that predicts the behavior type
+        # ------------------------------------------------------------------
+        # Replace decoder MLP heads with correct per-level output sizes
+        # ------------------------------------------------------------------
+        self.decoder.decoder_mlp = torch.nn.ModuleList([
+            torch.nn.Linear(self.embedding_dim, k, bias=False)
+            for k in self.sid_level_sizes
+        ])
+
+        # Linear head that predicts the behavior type
         self.behavior_mlp = torch.nn.Linear(self.embedding_dim, num_behaviors, bias=False)
+
+        # ------------------------------------------------------------------
+        # BM-TV embedding wrapper (optional, controlled by use_bmtv flag)
+        # ------------------------------------------------------------------
+        self.use_bmtv = use_bmtv
+        if use_bmtv:
+            if self.num_hierarchies != 3:
+                raise ValueError(
+                    f"BMTVEmbeddingWrapper requires num_hierarchies == 3 "
+                    f"(shared / text / image SID levels), got {self.num_hierarchies}"
+                )
+            self.bmtv_wrapper = BMTVEmbeddingWrapper(
+                d_model=self.embedding_dim,
+                max_seq_len=bmtv_max_seq_len,
+            )
+            # sep_token is not called in the BM-TV encoder path.
+            # Nullify it so DDP does not flag it as an unused parameter and crash.
+            self.register_parameter('sep_token', None)
+
+        # ------------------------------------------------------------------
+        # Explicit item-level PE + modality TE for the flat sequence
+        # (optional, controlled by use_item_pe flag, mutually exclusive with use_bmtv)
+        # ------------------------------------------------------------------
+        if use_item_pe and use_bmtv:
+            raise ValueError("use_item_pe and use_bmtv are mutually exclusive")
+        self.use_item_pe = use_item_pe
+        if use_item_pe:
+            stride = 1 + self.num_hierarchies
+            # item_pos_embedding: items share one slot → index 0..N-1
+            self.item_pos_embedding = nn.Embedding(item_pe_max_seq_len, self.embedding_dim)
+            # modality_type_embedding: one index per within-item slot (B=0, L0=1, L1=2, ..., LH=stride-1)
+            self.modality_type_embedding = nn.Embedding(stride, self.embedding_dim)
+            # sep_token bypassed; nullify it to avoid DDP unused-parameter crash.
+            self.register_parameter('sep_token', None)
 
     # ------------------------------------------------------------------
     # Offset helpers
     # ------------------------------------------------------------------
 
     def _mb_offset_pattern(self, num_cols: int, device: torch.device) -> torch.Tensor:
-        """(1+H)-periodic offset pattern: [H*cbs, 0, cbs, 2*cbs, H*cbs, ...]"""
-        cbs = self.num_embeddings_per_hierarchy
-        period = [self.behavior_offset] + [h * cbs for h in range(self.num_hierarchies)]
+        """(1+H)-periodic offset: [behavior_offset, off_L0, off_L1, ..., off_LH-1, ...]"""
+        period = [self.behavior_offset] + self.sid_level_offsets
         stride = 1 + self.num_hierarchies
         num_repeats = (num_cols + stride - 1) // stride
         return torch.tensor(period * num_repeats, dtype=torch.long, device=device)[:num_cols]
@@ -1181,18 +1384,53 @@ class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
         input_ids: torch.Tensor,
         user_id: torch.Tensor,
     ) -> torch.Tensor:
-        # apply (1+H)-periodic offset instead of H-periodic
-        offsets = self._mb_offset_pattern(input_ids.shape[1], input_ids.device)
-        shifted = (input_ids + offsets) * attention_mask
-        inputs_embeds = self.get_embedding_table("encoder")(shifted)
-
-        if self.sep_token is not None:
-            inputs_embeds, attention_mask = self._inject_sep_token_between_sids(
-                id_embeddings=inputs_embeds,
+        if self.use_bmtv:
+            # BM-TV path: produces (B, 3N, d_model) + matching (B, 3N) mask.
+            # sep_token is intentionally skipped; PE/TE in the wrapper carry
+            # the structural signals.
+            inputs_embeds, attention_mask = self.bmtv_wrapper(
+                input_ids=input_ids,
                 attention_mask=attention_mask,
-                sep_token=self.sep_token,
-                num_hierarchies=(1 + self.num_hierarchies),
+                embedding_table=self.item_sid_embedding_table_encoder,
+                stride=1 + self.num_hierarchies,
+                behavior_offset=self.behavior_offset,
+                sid_level_offsets=self.sid_level_offsets,
             )
+        else:
+            # Standard MB path: (1+H)-periodic offset lookup → (B, N*(1+H), d)
+            offsets = self._mb_offset_pattern(input_ids.shape[1], input_ids.device)
+            shifted = (input_ids + offsets) * attention_mask
+            inputs_embeds = self.get_embedding_table("encoder")(shifted)
+
+            if self.use_item_pe:
+                # Inject item-level PE and modality TE into the flat sequence.
+                # Sequence layout: [B_1, L0_1, L1_1, ..., B_2, L0_2, ...]
+                #   item_pos: 0,0,...(stride times),1,1,...  →  ties all tokens of item k
+                #   mod_ids:  0,1,2,...,stride-1 repeating  →  encodes within-item slot type
+                B_sz, L = input_ids.shape
+                stride = 1 + self.num_hierarchies
+                N = L // stride
+                item_pos = (
+                    torch.arange(N, device=input_ids.device)
+                    .repeat_interleave(stride)
+                    .unsqueeze(0).expand(B_sz, -1)
+                )  # (B, L)  — 0,0,0,0,1,1,1,1,...
+                mod_ids = (
+                    torch.arange(L, device=input_ids.device) % stride
+                ).unsqueeze(0).expand(B_sz, -1)  # (B, L)  — 0,1,2,3,0,1,2,3,...
+                inputs_embeds = (
+                    inputs_embeds
+                    + self.item_pos_embedding(item_pos)
+                    + self.modality_type_embedding(mod_ids)
+                )
+
+            if self.sep_token is not None:
+                inputs_embeds, attention_mask = self._inject_sep_token_between_sids(
+                    id_embeddings=inputs_embeds,
+                    attention_mask=attention_mask,
+                    sep_token=self.sep_token,
+                    num_hierarchies=(1 + self.num_hierarchies),
+                )
 
         if user_id is not None and self.user_embedding is not None:
             user_id = user_id[:, 0]
@@ -1345,7 +1583,7 @@ class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
 
             candidate_logits = self.decoder.decoder_mlp[hierarchy](
                 decoder_output[:, -1, :]
-            )  # (B*top_k, num_embeddings_per_hierarchy)
+            )  # (B*top_k, sid_level_sizes[hierarchy])
 
             generated_ids, marginal_log_prob, past_key_values = self._beam_search_one_step(
                 candidate_logits=candidate_logits,
@@ -1354,6 +1592,7 @@ class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
                 past_key_values=past_key_values,
                 hierarchy=step,
                 batch_size=batch_size,
+                num_emb_override=self.sid_level_sizes[hierarchy],
             )
 
         return generated_ids, marginal_log_prob  # (B, top_k, 1+H), (B, top_k)
@@ -1426,6 +1665,7 @@ class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
                 past_key_values=past_key_values,
                 hierarchy=step,
                 batch_size=batch_size,
+                num_emb_override=self.sid_level_sizes[hierarchy],
             )
 
         # strip behavior prefix, return SIDs only

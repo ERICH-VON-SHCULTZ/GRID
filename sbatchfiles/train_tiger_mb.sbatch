@@ -8,7 +8,7 @@
 #SBATCH --mem=200GB
 #SBATCH --gres=gpu:a100:1
 #SBATCH --job-name=train_tiger_mb
-#SBATCH --output=/scratch/yw8866/GRID/expoutfile/tiger_mb_2048_1024_mdsid.out
+#SBATCH --output=/scratch/yw8866/GRID/expoutfile/tiger_mb_2048_1024_mdsid_codebookinit_3view.out
 
 module purge
 
@@ -26,6 +26,7 @@ export WANDB_INSECURE_DISABLE_SSL=true
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 python /scratch/yw8866/GRID/src/train.py experiment=tiger_mb_train_flat \
+    codebook_init_path=/scratch/yw8866/logs/train/runs/2026-05-06/2048_1024/checkpoints/checkpoint_000_010000.ckpt \
     data_dir=/scratch/yw8866/rec-tmall/tfrecords_mb \
     semantic_id_path=/scratch/yw8866/logs/inference/runs/2026-05-06/2048_1024/pickle/semantic_ids.pt \
     num_hierarchies=3

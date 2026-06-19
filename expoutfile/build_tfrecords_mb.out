@@ -1,7 +1,8 @@
-2026-05-08 16:35:14.520026: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
-2026-05-08 16:35:17.875751: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+INFO:    FUSE2FS (3): Warning: Mounting unchecked fs, running e2fsck is recommended.
+2026-06-13 14:37:07.268116: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-06-13 14:37:09.900213: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
 To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 AVX512_FP16 AVX_VNNI AMX_TILE AMX_INT8 AMX_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
-Behavior map: {'pv': 0, 'fav': 1, 'cart': 2, 'buy': 3}
+Behavior map: {'click': 0, 'collect': 1, 'cart': 2, 'alipay': 3}
 
 Phase 1: Reading interaction logs...
   Reading tianchi_2014002_rec_tmall_log_parta.txt ...
@@ -11,6 +12,15 @@ Phase 1: Reading interaction logs...
   Reading tianchi_2014002_rec_tmall_log_partc.txt ...
     Rows so far: 1,097,552,816
 Total rows loaded: 1,097,552,816  (skipped malformed: 0)
+
+Behavior distribution over loaded interactions:
+  id=0 pv (click)    :  1,028,805,285  ( 93.74%)
+  id=1 fav (collect) :     26,906,894  (  2.45%)
+  id=2 cart          :     32,020,732  (  2.92%)
+  id=3 buy (alipay)  :      9,819,905  (  0.89%)
+
+  Skipped unknown-behavior rows: 0
+  (all behavior strings recognised — BEHAVIOR_MAP is correct)
 
 Phase 2: Sorting by (user_id, timestamp)...
   Done.

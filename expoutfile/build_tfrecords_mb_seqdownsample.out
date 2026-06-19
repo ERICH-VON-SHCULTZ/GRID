@@ -1,0 +1,69 @@
+2026-06-19 15:34:00.241609: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-06-19 15:34:04.482859: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 AVX512_FP16 AVX_VNNI AMX_TILE AMX_INT8 AMX_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+Behavior map: {'click': 0, 'collect': 1, 'cart': 2, 'alipay': 3}
+Rebalancing: event_downsample  (training split only, target_pv_ratio=0.8, seed=42)
+
+Phase 1: Reading interaction logs...
+  Reading tianchi_2014002_rec_tmall_log_parta.txt ...
+    Rows so far: 370,450,743
+  Reading tianchi_2014002_rec_tmall_log_partb.txt ...
+    Rows so far: 740,726,167
+  Reading tianchi_2014002_rec_tmall_log_partc.txt ...
+    Rows so far: 1,097,552,816
+Total rows loaded: 1,097,552,816  (skipped malformed: 0)
+
+Behavior distribution over loaded interactions:
+  id=0 pv (click)    :  1,028,805,285  ( 93.74%)
+  id=1 fav (collect) :     26,906,894  (  2.45%)
+  id=2 cart          :     32,020,732  (  2.92%)
+  id=3 buy (alipay)  :      9,819,905  (  0.89%)
+
+  Skipped unknown-behavior rows: 0
+  (all behavior strings recognised — BEHAVIOR_MAP is correct)
+
+Phase 2: Sorting by (user_id, timestamp)...
+  Done.
+
+Phase 3: Grouping users and writing TFRecord files...
+
+[rebalance] training natural pv ratio p0 = 0.9377  (target t = 0.800)
+[rebalance] event_downsample: keep 26.60% of pv events (drop 73.40%) within training sequences; all cart/collect/alipay kept.
+[rebalance] val/test sized to the user_drop reference (664,043 train users) -> identical eval set across modes.
+
+Done!
+  Users — train: 5,875,742  val: 83,005  test: 83,005  skipped (len not in [5, 200]): 1,513,002
+  Rebalance (event_downsample) — pv keep prob 0.2660; training users dropped post-thinning (<min_seq_len): 727,076
+  Val/test proportional subsample (natural distribution kept) — val dropped: 743,329  test dropped: 743,308
+  Split user ratio now ~ 0.80 : 0.10 : 0.10  (train 5,875,742 / val 83,005 / test 83,005)
+  Files — train: 1,176  val: 17  test: 17
+  Output: /scratch/yw8866/rec-tmall/tfrecords_mb_seqdownsample
+
+==============================================================
+Behavior ratio AFTER transformation (written interactions)
+==============================================================
+
+  GLOBAL  (total written interactions: 149,416,009)
+    id=0 pv (click)    :    120,915,042  ( 80.93%)
+    id=1 fav (collect) :     10,245,849  (  6.86%)
+    id=2 cart          :     13,463,857  (  9.01%)
+    id=3 buy (alipay)  :      4,791,261  (  3.21%)
+
+  [training]  (total: 138,121,267)
+    id=0 pv (click)    :    110,326,805  ( 79.88%)
+    id=1 fav (collect) :      9,991,601  (  7.23%)
+    id=2 cart          :     13,130,687  (  9.51%)
+    id=3 buy (alipay)  :      4,672,174  (  3.38%)
+
+  [evaluation]  (total: 5,642,461)
+    id=0 pv (click)    :      5,290,083  ( 93.75%)
+    id=1 fav (collect) :        126,586  (  2.24%)
+    id=2 cart          :        166,149  (  2.94%)
+    id=3 buy (alipay)  :         59,643  (  1.06%)
+
+  [testing]  (total: 5,652,281)
+    id=0 pv (click)    :      5,298,154  ( 93.73%)
+    id=1 fav (collect) :        127,662  (  2.26%)
+    id=2 cart          :        167,021  (  2.95%)
+    id=3 buy (alipay)  :         59,444  (  1.05%)
+==============================================================

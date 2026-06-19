@@ -1,0 +1,67 @@
+2026-06-08 15:00:36.924373: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-06-08 15:00:40.384407: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 AVX512_FP16 AVX_VNNI AMX_TILE AMX_INT8 AMX_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+=================================================================
+TFRecords-MB dataset analysis
+  Data dir: /scratch/yw8866/rec-tmall/tfrecords_mb
+=================================================================
+
+[training]  reading ...
+2026-06-08 15:01:01.905539: I tensorflow/core/kernels/data/tf_record_dataset_op.cc:370] TFRecordDataset `buffer_size` is unspecified, default to 262144
+2026-06-08 15:33:47.729179: I tensorflow/core/framework/local_rendezvous.cc:405] Local rendezvous is aborting with status: OUT_OF_RANGE: End of sequence
+  Users               : 6,602,818
+  Total interactions  : 449,293,479
+  Users with ≥1 buy   : 0  (0.0%)
+  Seq len — min=5  max=200  mean=68.0  median=56.0
+
+  Behavior distribution:
+    pv     (id=0): 436,067,282  ( 97.06%)
+    fav    (id=1):          0  (  0.00%)
+    cart   (id=2): 13,226,197  (  2.94%)
+    buy    (id=3):          0  (  0.00%)
+
+[evaluation]  reading ...
+2026-06-08 15:38:09.294230: I tensorflow/core/framework/local_rendezvous.cc:405] Local rendezvous is aborting with status: OUT_OF_RANGE: End of sequence
+  Users               : 826,334
+  Total interactions  : 56,143,313
+  Users with ≥1 buy   : 0  (0.0%)
+  Seq len — min=5  max=200  mean=67.9  median=56.0
+
+  Behavior distribution:
+    pv     (id=0): 54,491,992  ( 97.06%)
+    fav    (id=1):          0  (  0.00%)
+    cart   (id=2):  1,651,321  (  2.94%)
+    buy    (id=3):          0  (  0.00%)
+
+[testing]  reading ...
+  Users               : 826,313
+  Total interactions  : 56,210,538
+  Users with ≥1 buy   : 0  (0.0%)
+  Seq len — min=5  max=200  mean=68.0  median=56.0
+
+  Behavior distribution:
+    pv     (id=0): 54,556,861  ( 97.06%)
+    fav    (id=1):          0  (  0.00%)
+    cart   (id=2):  1,653,677  (  2.94%)
+    buy    (id=3):          0  (  0.00%)
+
+=================================================================
+GLOBAL SUMMARY (all splits combined)
+=================================================================
+  Total users         : 8,255,465
+  Total interactions  : 561,647,330
+  Users with ≥1 buy   : 0  (0.0%)
+  Seq len — min=5  max=200  mean=68.0  median=56
+
+  Behavior distribution:
+    pv     (id=0): 545,116,135  ( 97.06%)
+    fav    (id=1):          0  (  0.00%)
+    cart   (id=2): 16,531,195  (  2.94%)
+    buy    (id=3):          0  (  0.00%)
+
+  ── Compare to MMMB paper (ijcai dataset) ──
+    buy   : ours=  0.00%   paper=8.1%   delta=-8.1pp
+    cart  : ours=  2.94%   paper=0.2%   delta=+2.7pp
+    fav   : ours=  0.00%   paper=8.1%   delta=-8.1pp
+    pv    : ours= 97.06%   paper=83.6%   delta=+13.5pp
+=================================================================

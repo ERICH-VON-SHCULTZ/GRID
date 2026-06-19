@@ -1,0 +1,63 @@
+2026-06-13 19:51:31.813749: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-06-13 19:51:35.118924: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 AVX512_FP16 AVX_VNNI AMX_TILE AMX_INT8 AMX_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+Behavior map: {'click': 0, 'collect': 1, 'cart': 2, 'alipay': 3}
+Augmentation: ON  (drop pv/click-only users with p=0.5, seed=42)
+
+Phase 1: Reading interaction logs...
+  Reading tianchi_2014002_rec_tmall_log_parta.txt ...
+    Rows so far: 370,450,743
+  Reading tianchi_2014002_rec_tmall_log_partb.txt ...
+    Rows so far: 740,726,167
+  Reading tianchi_2014002_rec_tmall_log_partc.txt ...
+    Rows so far: 1,097,552,816
+Total rows loaded: 1,097,552,816  (skipped malformed: 0)
+
+Behavior distribution over loaded interactions:
+  id=0 pv (click)    :  1,028,805,285  ( 93.74%)
+  id=1 fav (collect) :     26,906,894  (  2.45%)
+  id=2 cart          :     32,020,732  (  2.92%)
+  id=3 buy (alipay)  :      9,819,905  (  0.89%)
+
+  Skipped unknown-behavior rows: 0
+  (all behavior strings recognised — BEHAVIOR_MAP is correct)
+
+Phase 2: Sorting by (user_id, timestamp)...
+  Done.
+
+Phase 3: Writing TFRecord files...
+
+Done!
+  Users — train: 5,667,790  val: 709,062  test: 709,196  skipped (seq not in [5, 200]): 1,513,002
+  Augmentation — dropped pv/click-only users: 1,169,417 (p=0.5)
+  Files — train: 1,134  val: 142  test: 142
+  Output: /scratch/yw8866/rec-tmall/tfrecords_mb_aug
+
+==============================================================
+Behavior ratio AFTER transformation (written interactions)
+==============================================================
+
+  GLOBAL  (total written interactions: 513,447,797)
+    id=0 pv (click)    :    478,426,148  ( 93.18%)
+    id=1 fav (collect) :     12,608,607  (  2.46%)
+    id=2 cart          :     16,531,195  (  3.22%)
+    id=3 buy (alipay)  :      5,881,847  (  1.15%)
+
+  [training]  (total: 410,752,789)
+    id=0 pv (click)    :    382,740,764  ( 93.18%)
+    id=1 fav (collect) :     10,081,479  (  2.45%)
+    id=2 cart          :     13,226,197  (  3.22%)
+    id=3 buy (alipay)  :      4,704,349  (  1.15%)
+
+  [evaluation]  (total: 51,313,882)
+    id=0 pv (click)    :     47,813,223  ( 93.18%)
+    id=1 fav (collect) :      1,261,002  (  2.46%)
+    id=2 cart          :      1,651,321  (  3.22%)
+    id=3 buy (alipay)  :        588,336  (  1.15%)
+
+  [testing]  (total: 51,381,126)
+    id=0 pv (click)    :     47,872,161  ( 93.17%)
+    id=1 fav (collect) :      1,266,126  (  2.46%)
+    id=2 cart          :      1,653,677  (  3.22%)
+    id=3 buy (alipay)  :        589,162  (  1.15%)
+==============================================================

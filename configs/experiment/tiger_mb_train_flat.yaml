@@ -29,6 +29,45 @@ stride_per_item: ${math_eval:${num_hierarchies}+1}
 sequence_length: ${math_eval:${stride_per_item}*40}  # 40 items → 160 tokens for H=3
 num_behaviors: 4
 
+# Codebook-geometry embedding injection (optional).
+# Set codebook_init_path to a MD-RQ-VAE checkpoint (.ckpt) to replace random
+# embedding initialisation with orthogonally up-projected codebook vectors.
+# Leave null to use the default random init.
+#
+# codebook_sizes must list the number of entries per SID level in order
+# [K_shared, K_text, K_image] matching the checkpoint's codebook sizes.
+# Ignored when codebook_init_path is null.
+#
+# Usage example:
+#   python src/train.py experiment=tiger_mb_train_flat \
+#       codebook_init_path=/scratch/yw8866/logs/train/runs/2026-05-06/2048_1024/checkpoints/checkpoint_000_010000.ckpt \
+#       data_dir=... semantic_id_path=... num_hierarchies=3
+codebook_init_path: null
+codebook_sizes:
+- 2048
+- 1024
+- 1024
+
+# Explicit item-level PE + modality TE for the flat sequence (optional).
+# When use_item_pe=true, structural embeddings are added to the standard flat encoder:
+#   - item_pos_embedding: all (1+H) tokens of item k share positional index k
+#     pattern in a sequence of N items: [0,0,0,0, 1,1,1,1, ..., N-1,N-1,N-1,N-1]
+#   - modality_type_embedding: within-item slot index (B=0, L0=1, L1=2, L2=3)
+#     pattern: [0,1,2,3, 0,1,2,3, ...]
+# Sequence length and T5 architecture are unchanged. Mutually exclusive with use_bmtv.
+use_item_pe: false
+item_pe_max_seq_len: 1024
+
+# Behavior-Modulated Triple-View encoder (optional).
+# When use_bmtv=true, the flat token lookup is replaced by the BM-TV wrapper:
+#   - builds three orthogonal views per item: V_shared=e_f, V_text=e_t, V_img=e_i
+#   - modulates each view via a 3-way Softmax(Linear(e_B)) behavior gate
+#   - interleaves triplets and adds item-level PE + modality type embeddings
+#   - encoder output length becomes 3*N instead of N*(1+H)
+# Decoder and T5 layers are unchanged. Requires num_hierarchies == 3.
+use_bmtv: false
+bmtv_max_seq_len: 1024
+
 task_name: train
 id: ${now:%Y-%m-%d}/${now:%H-%M-%S}
 tags:
@@ -277,6 +316,15 @@ model:
   num_user_bins: null
   codebooks: ${data_loading.train_dataloader_config.dataloader.dataset_config.semantic_id_map.sequence_data}
   mlp_layers: 2
+  # Codebook-geometry injection — mirrors the top-level switches
+  codebook_init_path: ${codebook_init_path}
+  codebook_sizes: ${codebook_sizes}
+  # Flat-sequence item PE — mirrors the top-level switches
+  use_item_pe: ${use_item_pe}
+  item_pe_max_seq_len: ${item_pe_max_seq_len}
+  # BM-TV encoder — mirrors the top-level switches
+  use_bmtv: ${use_bmtv}
+  bmtv_max_seq_len: ${bmtv_max_seq_len}
 
 callbacks:
   model_checkpoint:

@@ -1,0 +1,20 @@
+Sampling up to 2,000,000 lines from tianchi_2014002_rec_tmall_log_parta.txt ...
+Sampling up to 2,000,000 lines from tianchi_2014002_rec_tmall_log_partb.txt ...
+Sampling up to 2,000,000 lines from tianchi_2014002_rec_tmall_log_partc.txt ...
+
+=======================================================
+Distinct behavior strings (sampled 6,000,000 rows, malformed 0):
+=======================================================
+  'click'         :    5,618,017  ( 93.63%)
+  'cart'          :      179,677  (  2.99%)
+  'collect'       :      146,382  (  2.44%)
+  'alipay'        :       55,924  (  0.93%)
+
+Current BEHAVIOR_MAP in build_tmall_tfrecords_mb.py:
+  {'pv': 0, 'fav': 1, 'cart': 2, 'buy': 3}   (UNKNOWN_BEHAVIOR=0 -> pv)
+
+How each raw string is currently mapped:
+  'click'         -> id=0 (pv  )  [FELL THROUGH to UNKNOWN]
+  'cart'          -> id=2 (cart)  [MATCH]
+  'collect'       -> id=0 (pv  )  [FELL THROUGH to UNKNOWN]
+  'alipay'        -> id=0 (pv  )  [FELL THROUGH to UNKNOWN]
