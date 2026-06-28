@@ -322,6 +322,65 @@ class BehaviorAccuracy(CustomMeanReductionMetric):
         self.total_values += total
 
 
+class BehaviorClassMetric(torchmetrics.Metric):
+    """
+    Per-behavior precision / recall / F1 for the predicted behavior class.
+
+    Accumulates one-vs-rest TP / FP / FN counts for a single behavior id and
+    reduces them across workers in ``compute`` (so ``sync_on_compute=False``).
+        precision = TP / (TP + FP)
+        recall    = TP / (TP + FN)
+        f1        = TP / (TP + 0.5 * (FP + FN))   ==  2TP / (2TP + FP + FN)
+    A zero denominator yields 0.0 (convention for an undefined class metric).
+    """
+
+    def __init__(self, behavior_id: int, metric_type: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        if metric_type not in ("precision", "recall", "f1"):
+            raise ValueError(f"Unknown metric_type: {metric_type}")
+        self.behavior_id = behavior_id
+        self.metric_type = metric_type
+        self.tp = 0
+        self.fp = 0
+        self.fn = 0
+
+    def update(self, pred_behavior: torch.Tensor, gt_behavior: torch.Tensor) -> None:
+        pred_c = pred_behavior == self.behavior_id
+        gt_c = gt_behavior == self.behavior_id
+        self.tp += int((pred_c & gt_c).sum().item())
+        self.fp += int((pred_c & ~gt_c).sum().item())
+        self.fn += int((~pred_c & gt_c).sum().item())
+
+    def compute(self) -> torch.Tensor:
+        tp = torch.tensor(float(self.tp), device=self.device)
+        fp = torch.tensor(float(self.fp), device=self.device)
+        fn = torch.tensor(float(self.fn), device=self.device)
+
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            def _gather_sum(t: torch.Tensor) -> torch.Tensor:
+                return torch.cat(
+                    [g.unsqueeze(0) if g.dim() == 0 else g for g in gather_all_tensors(t)]
+                ).sum()
+
+            tp, fp, fn = _gather_sum(tp), _gather_sum(fp), _gather_sum(fn)
+
+        if self.metric_type == "precision":
+            denom = tp + fp
+        elif self.metric_type == "recall":
+            denom = tp + fn
+        else:  # f1
+            denom = tp + 0.5 * (fp + fn)
+
+        if denom.item() == 0:
+            return torch.tensor(0.0, device=self.device)
+        return tp / denom
+
+    def reset(self) -> None:
+        self.tp = 0
+        self.fp = 0
+        self.fn = 0
+
+
 class MultiBehaviorSIDRetrievalEvaluator(Evaluator):
     """
     Evaluator for multi-behavior TIGER.  Expects generated_ids of shape
@@ -333,13 +392,20 @@ class MultiBehaviorSIDRetrievalEvaluator(Evaluator):
         t2_ndcg_K, t2_recall_K  — conditioned on GT behavior → SID HR/NDCG
         t3_ndcg_K, t3_recall_K  — free generation → joint (behavior+SID) HR/NDCG
         t3_behavior_accuracy     — free generation → behavior prediction accuracy
+        t3_behavior_{precision,recall,f1}_{pv,fav,cart,buy}
+                                 — free generation → per-behavior classification metrics
+                                   (best-beam predicted behavior vs GT behavior, one-vs-rest)
     """
+
+    # Default behavior id -> short name used in per-behavior metric names.
+    DEFAULT_BEHAVIOR_NAMES = {0: "pv", 1: "fav", 2: "cart", 3: "buy"}
 
     def __init__(
         self,
         metrics: Dict[str, CustomRetrievalMetric],
         top_k_list: List[int],
         buy_behavior_id: int = 3,
+        behavior_names: Dict[int, str] = None,
     ):
         def _make(prefix, name, obj):
             return {
@@ -354,6 +420,19 @@ class MultiBehaviorSIDRetrievalEvaluator(Evaluator):
         all_metrics["t3_behavior_accuracy"] = BehaviorAccuracy(
             sync_on_compute=False, compute_with_cache=False
         )
+
+        # Per-behavior precision / recall / f1 on the free-generation (t3) behavior prediction.
+        self.behavior_names = (
+            behavior_names if behavior_names is not None else self.DEFAULT_BEHAVIOR_NAMES
+        )
+        for bid, bname in self.behavior_names.items():
+            for mtype in ("precision", "recall", "f1"):
+                all_metrics[f"t3_behavior_{mtype}_{bname}"] = BehaviorClassMetric(
+                    behavior_id=bid,
+                    metric_type=mtype,
+                    sync_on_compute=False,
+                    compute_with_cache=False,
+                )
 
         self.buy_behavior_id = buy_behavior_id
         self.metrics = all_metrics
@@ -391,7 +470,7 @@ class MultiBehaviorSIDRetrievalEvaluator(Evaluator):
         )
 
         for key, metric_object in self.metrics.items():
-            if key.startswith(track) and not key.endswith("accuracy"):
+            if key.startswith(track) and isinstance(metric_object, CustomRetrievalMetric):
                 metric_object.update(
                     preds,
                     target.to(preds.device),
@@ -441,15 +520,20 @@ class MultiBehaviorSIDRetrievalEvaluator(Evaluator):
             .reshape(-1)
         )
         for key, metric_object in self.metrics.items():
-            if key.startswith("t3") and not key.endswith("accuracy"):
+            if key.startswith("t3") and isinstance(metric_object, CustomRetrievalMetric):
                 metric_object.update(
                     preds_flat,
                     joint_match.to(preds_flat.device),
                     indexes=expanded_indexes.to(preds_flat.device),
                 )
 
-        # ---- Track 3: behavior accuracy (best beam) ----
+        # ---- Track 3: behavior accuracy + per-behavior P/R/F1 (best beam) ----
         best_beam = marginal_probs.argmax(dim=-1)  # (B,)
         best_pred = pred_behavior[torch.arange(batch_size, device=pred_behavior.device), best_beam]
         correct = int((best_pred == gt_behavior).sum().item())
         self.metrics["t3_behavior_accuracy"].update(correct, batch_size)
+
+        # Per-behavior precision / recall / f1 over the best-beam predicted behavior.
+        for metric_object in self.metrics.values():
+            if isinstance(metric_object, BehaviorClassMetric):
+                metric_object.update(best_pred, gt_behavior)

@@ -8,7 +8,7 @@
 #SBATCH --mem=200GB
 #SBATCH --gres=gpu:a100:1
 #SBATCH --job-name=train_tiger_mb
-#SBATCH --output=/scratch/yw8866/GRID/expoutfile/tiger_mb_2048_1024_mdsid_codebookinit_3view.out
+#SBATCH --output=/scratch/yw8866/GRID/expoutfile/tiger_mb_2048_1024_mdsid_codebookinit.out
 
 module purge
 
