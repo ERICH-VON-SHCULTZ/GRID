@@ -13,6 +13,7 @@ from src.data.loading.components.interfaces import (
     SequentialModelInputData,
     SequentialModuleLabelData,
 )
+from src.components.loss_functions import FocalLoss
 from src.models.components.interfaces import OneKeyPerPredictionOutput
 from src.models.components.network_blocks.mlp import MLP
 from src.models.modules.huggingface.transformer_base_module import TransformerBaseModule
@@ -1242,6 +1243,17 @@ class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
         bmtv_max_seq_len: int = 256,
         use_item_pe: bool = False,
         item_pe_max_seq_len: int = 256,
+        focal_behavior: bool = False,
+        focal_gamma: float = 2.0,
+        focal_alpha: Optional[List[float]] = None,
+        behavior_weighted_sid: bool = False,
+        sid_behavior_weights: Optional[List[float]] = None,
+        use_semantic_align: bool = False,
+        semantic_align_weight: float = 1.0,
+        align_loss_type: str = "mse",
+        align_temperature: float = 0.07,
+        use_semantic_rerank: bool = False,
+        rerank_weight: float = 0.5,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -1363,6 +1375,59 @@ class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
             # sep_token bypassed; nullify it to avoid DDP unused-parameter crash.
             self.register_parameter('sep_token', None)
 
+        # ------------------------------------------------------------------
+        # Loss rebalancing for the behavior class imbalance (optional)
+        # ------------------------------------------------------------------
+        # (1) Focal loss on the behavior head — focuses gradient on hard/rare
+        #     behaviors (buy/cart/fav) instead of the dominant pv.
+        self.focal_behavior = focal_behavior
+        if focal_behavior:
+            self.behavior_loss_function = FocalLoss(gamma=focal_gamma, alpha=focal_alpha)
+        else:
+            self.behavior_loss_function = None
+
+        # (2) Behavior-weighted SID loss — weight each item's SID loss by its TARGET
+        #     behavior so rare-behavior interactions (buy) get more SID gradient.
+        self.behavior_weighted_sid = behavior_weighted_sid
+        if behavior_weighted_sid:
+            if sid_behavior_weights is None:
+                sid_behavior_weights = [1.0] * num_behaviors
+            if len(sid_behavior_weights) != num_behaviors:
+                raise ValueError(
+                    f"sid_behavior_weights must have {num_behaviors} entries "
+                    f"(one per behavior), got {len(sid_behavior_weights)}"
+                )
+            self.register_buffer(
+                "sid_behavior_weights",
+                torch.tensor(sid_behavior_weights, dtype=torch.float),
+            )
+
+        # ------------------------------------------------------------------
+        # Two-View Semantic Alignment + Retrieval (optional)
+        # ------------------------------------------------------------------
+        # Predict the next item's MD-RQ-VAE reconstruction views v_t=e_f+e_t (text)
+        # and v_i=e_f+e_i (image) from the decoder's item-position hidden state.
+        #   - use_semantic_align: add an MSE align loss to a stop-grad target (train).
+        #   - use_semantic_rerank: rerank the free-gen candidate pool by cosine of the
+        #     predicted (q_t, q_i) to each candidate's (v_t, v_i) (inference).
+        # Requires num_hierarchies == 3 (shared/text/image levels).
+        self.use_semantic_align = use_semantic_align
+        self.semantic_align_weight = semantic_align_weight
+        if align_loss_type not in ("mse", "contrastive"):
+            raise ValueError(f"align_loss_type must be 'mse' or 'contrastive', got {align_loss_type}")
+        self.align_loss_type = align_loss_type
+        self.align_temperature = align_temperature
+        self.use_semantic_rerank = use_semantic_rerank
+        self.rerank_weight = rerank_weight
+        if use_semantic_align or use_semantic_rerank:
+            if self.num_hierarchies != 3:
+                raise ValueError(
+                    "Two-View semantic align/rerank requires num_hierarchies == 3 "
+                    f"(shared/text/image), got {self.num_hierarchies}"
+                )
+            self.align_head_text = torch.nn.Linear(self.embedding_dim, self.embedding_dim)
+            self.align_head_image = torch.nn.Linear(self.embedding_dim, self.embedding_dim)
+
     # ------------------------------------------------------------------
     # Offset helpers
     # ------------------------------------------------------------------
@@ -1373,6 +1438,55 @@ class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
         stride = 1 + self.num_hierarchies
         num_repeats = (num_cols + stride - 1) // stride
         return torch.tensor(period * num_repeats, dtype=torch.long, device=device)[:num_cols]
+
+    def _sid_two_view(self, sid: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Map SID indices to the MD-RQ-VAE reconstruction views (requires H==3):
+            v_t = e_f + e_t (text latent),  v_i = e_f + e_i (image latent)
+        sid: (..., 3) -> (v_t, v_i), each (..., embedding_dim).
+        """
+        table = self.item_sid_embedding_table_encoder
+        o0, o1, o2 = self.sid_level_offsets
+        sid = sid.long().clamp(min=0)
+        e_f = table(sid[..., 0] + o0)
+        e_t = table(sid[..., 1] + o1)
+        e_i = table(sid[..., 2] + o2)
+        return e_f + e_t, e_f + e_i
+
+    def _blend_rerank(self, marginal: torch.Tensor, sim: torch.Tensor) -> torch.Tensor:
+        """
+        Per-sample min-max normalize the decoder marginal score and the semantic
+        similarity, then blend: score = (1-w)*marginal + w*sim  (w = rerank_weight).
+        w=0 reproduces the decoder ranking (baseline); w=1 is pure semantic retrieval.
+        """
+        def _norm(x: torch.Tensor) -> torch.Tensor:
+            mn = x.min(dim=1, keepdim=True).values
+            mx = x.max(dim=1, keepdim=True).values
+            return (x - mn) / (mx - mn).clamp(min=1e-8)
+
+        w = self.rerank_weight
+        return (1.0 - w) * _norm(marginal) + w * _norm(sim)
+
+    def _contrastive_align(
+        self, pred: torch.Tensor, tgt: torch.Tensor, gt_sid: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        InfoNCE align loss: the predicted query `pred` should rank its own GT item's
+        view `tgt` above the other items in the batch (in-batch negatives), using cosine
+        similarity / temperature — the same geometry used by the rerank at inference.
+
+        In-batch items that share the anchor's exact SID tuple are masked out (they are
+        the same item — false negatives; collision rate ~36%).
+        """
+        B = pred.size(0)
+        pred_n = torch.nn.functional.normalize(pred, dim=-1)
+        tgt_n = torch.nn.functional.normalize(tgt.detach(), dim=-1)
+        logits = (pred_n @ tgt_n.t()) / self.align_temperature  # (B, B)
+        same = (gt_sid.unsqueeze(1) == gt_sid.unsqueeze(0)).all(dim=-1)  # (B, B)
+        eye = torch.eye(B, dtype=torch.bool, device=pred.device)
+        logits = logits.masked_fill(same & ~eye, float("-inf"))
+        labels = torch.arange(B, device=pred.device)
+        return torch.nn.functional.cross_entropy(logits, labels)
 
     # ------------------------------------------------------------------
     # Forward pass overrides
@@ -1535,6 +1649,13 @@ class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
         )
         behavior_logits = self.behavior_mlp(decoder_output[:, -1, :])  # (B, num_behaviors)
 
+        # Two-View rerank query: predict the next item's reconstruction views from the
+        # item-summary hidden state (after BOS, before committing to behavior/SIDs).
+        if self.use_semantic_rerank:
+            h_item = decoder_output[:, -1, :]  # (B, d)
+            rerank_q_t = self.align_head_text(h_item)   # (B, d)
+            rerank_q_i = self.align_head_image(h_item)  # (B, d)
+
         # top-k over behavior (small vocab — simple selection, no prefix check)
         top_k_b = min(self.top_k_for_generation, self.num_behaviors)
         behavior_probs = torch.nn.functional.softmax(behavior_logits, dim=-1)
@@ -1594,6 +1715,18 @@ class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
                 batch_size=batch_size,
                 num_emb_override=self.sid_level_sizes[hierarchy],
             )
+
+        # Two-View rerank: reorder the candidate pool by cosine of the predicted views
+        # (rerank_q_t, rerank_q_i) to each candidate's (v_t, v_i). The evaluator then
+        # takes top-K by this blended score, so widen top_k_for_generation into a pool.
+        if self.use_semantic_rerank:
+            cand_vt, cand_vi = self._sid_two_view(generated_ids[:, :, 1:])  # (B, pool, d)
+            cos = torch.nn.functional.cosine_similarity
+            sim = 0.5 * (
+                cos(rerank_q_t.unsqueeze(1), cand_vt, dim=-1)
+                + cos(rerank_q_i.unsqueeze(1), cand_vi, dim=-1)
+            )  # (B, pool)
+            marginal_log_prob = self._blend_rerank(marginal_log_prob, sim)
 
         return generated_ids, marginal_log_prob  # (B, top_k, 1+H), (B, top_k)
 
@@ -1708,19 +1841,125 @@ class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
         # Drop the last position (prediction for position after the last label).
         model_output = model_output[:, :-1]  # (B, 1+H, embed_dim)
 
-        # behavior loss at position 0
+        # behavior loss at position 0 (focal if enabled, else plain CE)
         behavior_logits = self.behavior_mlp(model_output[:, 0])  # (B, num_behaviors)
-        loss = self.loss_function(input=behavior_logits, target=fut_ids[:, 0].long())
+        behavior_target = fut_ids[:, 0].long()
+        behavior_loss_fn = self.behavior_loss_function or self.loss_function
+        loss = behavior_loss_fn(input=behavior_logits, target=behavior_target)
+
+        # Per-example SID weights keyed by the TARGET behavior (behavior-weighted SID).
+        if self.behavior_weighted_sid:
+            sid_weights = self.sid_behavior_weights.to(behavior_target.device)[behavior_target]  # (B,)
+            weight_denom = sid_weights.sum().clamp(min=1e-8)
 
         # SID losses at positions 1..H
         for hierarchy in range(self.num_hierarchies):
             sid_logits = self.decoder.decoder_mlp[hierarchy](model_output[:, hierarchy + 1])
-            loss += self.loss_function(
-                input=sid_logits,
-                target=fut_ids[:, hierarchy + 1].long(),
-            )
+            sid_target = fut_ids[:, hierarchy + 1].long()
+            if self.behavior_weighted_sid:
+                # weighted mean over the batch (normalized by sum of weights)
+                per_example_ce = torch.nn.functional.cross_entropy(
+                    sid_logits, sid_target, reduction="none"
+                )  # (B,)
+                loss += (sid_weights * per_example_ce).sum() / weight_denom
+            else:
+                loss += self.loss_function(input=sid_logits, target=sid_target)
+
+        # Two-View semantic alignment loss: predict the next item's reconstruction
+        # views (v_t=e_f+e_t, v_i=e_f+e_i) from the item-summary hidden state (pos 0,
+        # after BOS) and regress to a stop-grad target.
+        if self.use_semantic_align:
+            h_item = model_output[:, 0]  # (B, d)
+            pred_vt = self.align_head_text(h_item)
+            pred_vi = self.align_head_image(h_item)
+            with torch.no_grad():
+                tgt_vt, tgt_vi = self._sid_two_view(fut_ids[:, 1:])
+            if self.align_loss_type == "contrastive":
+                gt_sid = fut_ids[:, 1:].long()
+                align_loss = (
+                    self._contrastive_align(pred_vt, tgt_vt, gt_sid)
+                    + self._contrastive_align(pred_vi, tgt_vi, gt_sid)
+                )
+            else:  # mse
+                align_loss = (
+                    torch.nn.functional.mse_loss(pred_vt, tgt_vt)
+                    + torch.nn.functional.mse_loss(pred_vi, tgt_vi)
+                )
+            loss = loss + self.semantic_align_weight * align_loss
 
         return model_output, loss
+
+    @torch.no_grad()
+    def _update_sid_probe(
+        self,
+        generated_ids: torch.Tensor,   # (B, top_k, 1+H)
+        marginal_probs: torch.Tensor,  # (B, top_k)
+        labels: torch.Tensor,          # (B, 1+H)
+    ) -> None:
+        """
+        Semantic near-miss probe. Among MISS cases (GT SID tuple not in the top-k
+        generated SIDs), measure how close the best-beam predicted SID is to the GT
+        SID in the MD-RQ-VAE reconstruction space — cosine similarity of v_t=e_f+e_t
+        and v_i=e_f+e_i — versus a random in-batch item. Accumulated per behavior +
+        overall into the evaluator's `probe_*` metrics.
+
+          near-miss  : pred_sim >> rand_sim  -> semantic retrieval could recover GT
+          unpredictable: pred_sim ≈ rand_sim -> the miss is essentially random
+
+        NOTE: rebalancing (user_drop / event_downsample) is training-only; eval/test
+        stay at the natural ~93% pv distribution for every run. So `overall` is the same
+        mix across runs (and is pv-dominated, hence uninformative about rare behaviors)
+        — read the per-behavior groups (buy/cart/fav) for the rare-behavior signal.
+        """
+        if self.num_hierarchies != 3:
+            return  # property e_f+e_t / e_f+e_i is defined for shared/text/image only
+
+        device = labels.device
+        B = labels.size(0)
+        table = self.item_sid_embedding_table_encoder
+        o0, o1, o2 = self.sid_level_offsets
+
+        gt_behavior = labels[:, 0].long()
+        gt_sid = labels[:, 1:].long().clamp(min=0)               # (B, 3)
+        pred_all = generated_ids[:, :, 1:].long().clamp(min=0)   # (B, k, 3)
+        best = marginal_probs.argmax(dim=1)                      # (B,)
+        pred_sid = pred_all[torch.arange(B, device=device), best]  # (B, 3)
+
+        # miss = GT SID tuple absent from every top-k beam
+        miss = ~torch.all(pred_all == gt_sid.unsqueeze(1), dim=2).any(dim=1)  # (B,)
+
+        def sem(sid: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+            e_f = table(sid[..., 0] + o0)
+            e_t = table(sid[..., 1] + o1)
+            e_i = table(sid[..., 2] + o2)
+            return e_f + e_t, e_f + e_i  # (v_t, v_i)
+
+        vt_gt, vi_gt = sem(gt_sid)
+        vt_pr, vi_pr = sem(pred_sid)
+        perm = torch.randperm(B, device=device)
+        cos = torch.nn.functional.cosine_similarity
+        sim_pred = 0.5 * (cos(vt_pr, vt_gt, dim=-1) + cos(vi_pr, vi_gt, dim=-1))      # (B,)
+        sim_rand = 0.5 * (cos(vt_gt[perm], vt_gt, dim=-1) + cos(vi_gt[perm], vi_gt, dim=-1))
+
+        groups = [("overall", torch.ones(B, dtype=torch.bool, device=device))]
+        for bid, bname in self.evaluator.behavior_names.items():
+            groups.append((bname, gt_behavior == bid))
+
+        for gname, gmask in groups:
+            total = int(gmask.sum().item())
+            if total > 0:
+                self.evaluator.metrics[f"probe_{gname}_miss_frac"].update(
+                    float((gmask & miss).sum().item()), total
+                )
+            m = gmask & miss
+            cnt = int(m.sum().item())
+            if cnt > 0:
+                self.evaluator.metrics[f"probe_{gname}_miss_pred_sim"].update(
+                    float(sim_pred[m].sum().item()), cnt
+                )
+                self.evaluator.metrics[f"probe_{gname}_miss_rand_sim"].update(
+                    float(sim_rand[m].sum().item()), cnt
+                )
 
     def eval_step(
         self,
@@ -1762,5 +2001,9 @@ class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
             marginal_probs_t2=marginal_probs_t2,
             generated_ids_t2=generated_ids_t2,
         )
+
+        # Semantic near-miss probe (no-op unless probe_sid_distance=True on the evaluator).
+        if getattr(self.evaluator, "probe_sid_distance", False):
+            self._update_sid_probe(generated_ids, marginal_probs, labels)
 
         loss_to_aggregate(loss)

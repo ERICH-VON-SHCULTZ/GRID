@@ -70,6 +70,54 @@ class FullBatchCrossEntropyLoss(nn.Module):
 
         return loss
     
+class FocalLoss(nn.Module):
+    """
+    Multi-class focal loss (Lin et al., 2017).
+
+        FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+
+    where p_t is the softmax probability of the true class. The (1 - p_t)^gamma
+    factor down-weights easy / well-classified examples so the gradient focuses on
+    hard / rare ones (e.g. the rare `buy` behavior vs the dominant `pv`).
+
+    Drop-in replacement for nn.CrossEntropyLoss: called as forward(input=logits,
+    target=class_indices).
+    """
+
+    def __init__(
+        self,
+        gamma: float = 2.0,
+        alpha: Optional[list] = None,
+        reduction: str = "mean",
+    ) -> None:
+        super().__init__()
+        self.gamma = gamma
+        self.reduction = reduction
+        if alpha is not None:
+            self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float))
+        else:
+            self.alpha = None
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            input:  (N, C) raw logits.
+            target: (N,)   class indices.
+        """
+        target = target.long()
+        log_prob = F.log_softmax(input, dim=-1)                       # (N, C)
+        log_pt = log_prob.gather(1, target.unsqueeze(1)).squeeze(1)   # (N,)
+        pt = log_pt.exp()
+        focal = (1.0 - pt) ** self.gamma * (-log_pt)                  # (N,)
+        if self.alpha is not None:
+            focal = self.alpha.to(input.device)[target] * focal
+        if self.reduction == "mean":
+            return focal.mean()
+        if self.reduction == "sum":
+            return focal.sum()
+        return focal
+
+
 class WeightedSquaredError(torch.nn.Module):
     def __init__(self):
         """Initialize the WeightedSquaredError loss function."""

@@ -223,6 +223,39 @@ to `inputs_embeds`. Encoder/decoder are 4 layers, d_model=128, 6 heads, d_ff=102
 History: an earlier **dual-view** `BMDVEmbeddingWrapper` / `use_bmdv` was replaced by the
 triple-view `BMTV`. Do not reintroduce the `bmdv` names.
 
+### Loss-rebalancing switches (config + model; default OFF, independent)
+Total training loss = `behavior_CE + Σ_h SID_CE_h`, all summed equally. Two switches reshape it
+to fight the pv imbalance (no covariate shift — all data/histories kept):
+- **`focal_behavior`** (+ `focal_gamma` default 2.0, + optional `focal_alpha` per-class weights
+  `[pv,fav,cart,buy]`) — replace plain CE on the behavior head with focal loss
+  `FL=-α_c·(1-p_t)^γ·log(p_t)` (`FocalLoss` in `components/loss_functions.py`). Focuses gradient on
+  hard/rare behaviors. Affects t3 behavior P/R/F1 + joint. ⚠ γ=2 **overcorrects** (collapses pv —
+  see §12); lower γ is the primary knob, α can't rescue pv at high γ.
+- **`behavior_weighted_sid`** (+ `sid_behavior_weights=[pv,fav,cart,buy]`, default `[1,3,3,8]`) —
+  weight each item's SID loss by its TARGET behavior (`fut_ids[:,0]`), reduced as a weighted
+  mean `Σ(w·CE)/Σw`. Pushes the model to nail SIDs for rare-behavior (buy) items → targets t1.
+  Stored as a registered buffer (DDP-safe). Only affects the training loss, not eval/generation.
+
+### Two-View Semantic Alignment + Retrieval (config + model; default OFF, need H==3)
+Leverages the MD-RQ-VAE **addable** property (`e_f+e_t ≈ text latent`, `e_f+e_i ≈ image latent`,
+preserved into d_model by the orthogonal `W_up`). Two heads `align_head_text/image` on the decoder
+**item-summary hidden state** (position 0, after BOS) predict the next item's `(v_t, v_i)`.
+- **`use_semantic_align`** (+ `semantic_align_weight`, `align_loss_type`, `align_temperature`) —
+  TRAIN two heads on a **stop-grad** `_sid_two_view(fut_ids[:,1:])` target, added in `model_step`.
+  `align_loss_type='mse'` (regress query→GT view) or `'contrastive'` (InfoNCE, `_contrastive_align`:
+  query must RANK its GT view above in-batch negatives, cosine/temperature, false-negative SID mask).
+  Contrastive matches the cosine rerank and trains discriminative (not shared-code) structure.
+- **`use_semantic_rerank`** (+ `rerank_weight`, default 0.5) — INFER: in `generate_multibehavior`,
+  reorder the candidate pool by cosine of predicted `(q_t,q_i)` to each candidate's `(v_t,v_i)`;
+  `_blend_rerank` per-sample min-max normalizes and blends with the decoder score (w=0 baseline,
+  w=1 pure semantic). Rerank helps recall@10 only if pool>10 → widen `top_k_for_generation` (e.g.
+  50); the evaluator takes top-K by the blended score itself.
+- Motivation/expected effect: **aggregate/pv lever** (converts pv near-misses to hits; §12c). NOT a
+  buy lever (buy SID already 96% solved). Helper `_sid_two_view` shared with the probe.
+- ⚠ Rerank uses the trained heads, so **train with `use_semantic_align=true` first**. Using rerank
+  in a *training* run without align leaves the heads gradient-less → DDP unused-param crash; for a
+  checkpoint-only eval use `train=false`.
+
 ### Codebook init (utils/codebook_embedding_init.py)
 `build_codebook_init_embedding` loads the 3 MD-RQ-VAE centroid matrices (shared/text/image) and
 **orthogonally up-projects** them (`W_up ∈ R^{d_vae×d_model}`, `nn.init.orthogonal_`) into the
@@ -245,6 +278,14 @@ tracks (top-k generation, k from `top_k_for_generation`, default 10):
   TP/FP/FN gather; behavior names default `{0:pv,1:fav,2:cart,3:buy}`, overridable via the
   evaluator's `behavior_names` arg).
 Checkpoint monitor is `val/t2_recall_5` (mode max). Consider `t1_recall_5` if selecting for buy.
+
+**Semantic near-miss probe** (eval-only diagnostic, switch `probe_sid_distance`, default off;
+`model._update_sid_probe`). Among MISS cases (GT SID not in free-gen top-k), logs per behavior +
+overall: `probe_{group}_miss_{pred_sim,rand_sim,frac}` — cosine similarity of the best-beam
+predicted SID to GT in the `e_f+e_t / e_f+e_i` reconstruction space, vs a random in-batch item, and
+the miss fraction. `pred_sim ≫ rand_sim` ⇒ near-miss (retrieval could help); `≈` ⇒ random. Runs on
+the natural test set (~93% pv) regardless of training rebalancing — read per-behavior groups, not
+`overall` (pv-dominated). Requires num_hierarchies==3. Findings in §12.
 
 vs MMMB-Genrec: same metrics & K. MMMB matches the *entire generated sequence* (behavior+SIDs)
 and has Target/Behavior_specific/Behavior_item modes; we score the SID portion and break
@@ -326,5 +367,141 @@ W&B project `MMMBGRec`. `restart_job` callback supports Slurm requeue + checkpoi
 - [x] `use_item_pe` and `use_bmtv` (and codebook init, weights_only fix) implemented.
 - [ ] Rebuilt `tfrecords_mb` (post behavior-fix) + `tfrecords_mb_seqdownsample` not yet
       confirmed run after the latest val/test-parity change.
-- [ ] Training comparison user_drop vs event_downsample, and use_item_pe / use_bmtv ablations,
-      not yet run/validated end-to-end.
+- [x] Behavior-imbalance interventions run end-to-end (data rebalancing, scale-up, focal,
+      behavior-weighted SID) — see §12.
+- [x] SID-collision / codebook-utilization diagnostic run — codebooks healthy (≈100% active all
+      levels), collision 36.2% (acceptable, and the metric matches SID tuples not item ids so
+      collisions don't cap it). Ruled out as the ceiling. See §12.
+- [x] Semantic near-miss probe run on user_drop — misses are near-misses, conversions already solved
+      on the SID side; behavior head is the bottleneck. See §12.
+- [x] Behavior-focal γ/α frontier mapped (γ=1 best buy_F1 0.341; cart/fav unlearnable; joint flat) — §12d.
+- [ ] Two-View semantic align + rerank **implemented** (§12e) — NOT yet run. Next experiment.
+- [ ] use_item_pe / use_bmtv not re-evaluated on fixed data.
+
+---
+
+## 12. Experiment log — behavior-imbalance interventions
+
+Test-set results (top-k=10). Bold = best in column. ⬇ loss better; others higher better.
+pv≈93.6% / fav≈2.4% / cart≈3.0% / buy≈0.9% of interactions.
+
+| # | run | Loss⬇ | t1_NDCG (buy) | t1_Rec | t2_Rec | t3_BehAcc | buy_P | buy_R | buy_F1 | cart_R | fav_R | pv_R | joint_Rec |
+|---|-----|------|------|------|------|------|------|------|------|------|------|------|------|
+| 1 | Original (natural)          | 12.661 | 0.886 | 0.963 | 0.150 | **0.864** | 0.388 | 0.141 | 0.207 | 0.174 | 0.297 | **0.907** | 0.186 |
+| 2 | Seq Down (event_downsample) | 12.861 | 0.861 | 0.938 | 0.146 | 0.832 | 0.269 | **0.345** | **0.302** | 0.242 | 0.255 | 0.869 | 0.183 |
+| 3 | User Drop                   | 13.098 | 0.888 | 0.962 | 0.156 | 0.626 | **0.450** | 0.170 | 0.247 | 0.435 | 0.572 | 0.640 | 0.193 |
+| 4 | User Drop + Scale (d256/L8)  | 13.455 | 0.883 | 0.951 | 0.153 | 0.643 | 0.359 | 0.193 | 0.251 | 0.313 | 0.563 | 0.661 | 0.182 |
+| 5 | User Drop + Behavior Focal   | 12.792 | **0.895** | **0.973** | **0.157** | 0.173 | 0.235 | 0.298 | 0.263 | **0.766** | **0.687** | 0.145 | **0.195** |
+| 6 | User Drop + Beh + SID(focal/wtd) | **11.186** | 0.893 | 0.962 | **0.157** | 0.267 | 0.216 | 0.242 | 0.228 | 0.638 | 0.679 | 0.249 | 0.188 |
+
+Key reads:
+- **t1 (buy SID retrieval) is already ~0.96 everywhere** and barely moves — the model is good at
+  SID-given-behavior. **joint_Rec is stuck at ~0.18–0.20 across ALL runs** → the ceiling is NOT
+  the loss/data balance; it's elsewhere (SID quality / collisions, or inherent difficulty). This
+  is why the codebook diagnostic (§11) is the next priority.
+- **Scale-up (#4) did not help** — worst loss, no metric win. Confirms the model wasn't capacity-bound.
+- **Behavior focal (#5, γ=2, no α) overcorrects**: minority recall soars (cart 0.77, fav 0.69,
+  buy 0.30) but pv recall collapses 0.91→0.145 and behavior accuracy collapses 0.86→0.17 (because
+  pv is 93% of samples). Best t1 and best joint, but the behavior head is now badly miscalibrated.
+- **Best buy F1 came from data rebalancing (#2 Seq Down, 0.302), not focal** — and #2 keeps pv
+  recall (0.87) and behavior accuracy (0.83) intact. Best balance for buy so far.
+- **Best buy precision: User Drop (#3, 0.45).** Trade-off: precision (user_drop) vs recall (seq_down).
+- There is **no free lunch on behavior**: every method trades the pv majority for the rare classes,
+  because the model must commit to one behavior per generation and pv is 93%.
+
+Standing decision: current focal at γ=2 is **too aggressive**. Treat event_downsample (#2) as the
+working baseline for buy.
+
+### 12b. SID diagnostics (semantic_ids.pt, 5.41M items, widths [2048,1024,1024])
+
+**Codebook health:** levels ≈100% active (2046/2048, 1024/1024, 1024/1024) — no collapse.
+**Collisions:** 36.2% of items share a SID with another (4.16M unique tuples; largest group 152).
+Acceptable — and since the evaluator matches **SID tuples, not item ids**, collisions don't cap the
+metric (they only add ~36% training label noise). So the joint_Rec ceiling is **not** a SID-space
+problem.
+
+### 12c. Semantic near-miss probe (user_drop checkpoint, natural ~93% pv test)
+
+| group | hit rate (1−miss) | pred_sim | rand_sim | ratio |
+|-------|------|------|------|------|
+| buy   | **96.2%** | 0.131 | 0.044 | 3.0× |
+| cart  | **96.8%** | 0.220 | 0.081 | 2.7× |
+| fav   | **94.5%** | 0.221 | 0.076 | 2.9× |
+| pv    | 14.6% | 0.220 | 0.089 | 2.5× |
+| overall | 19.6% | 0.220 | 0.089 | 2.5× |
+
+Two conclusions, both important:
+1. **Conversions are already solved on the SID side.** Free-gen top-k contains the GT item's SID
+   for buy/cart/fav **94–97%** of the time (this is measured *without* conditioning on the correct
+   behavior — behavior token is stripped, grouped by GT behavior). The 0.19 joint ceiling is purely
+   **pv** being unpredictable (15% hit), and pv is ~93% of test. So SID/item prediction is **not**
+   the bottleneck for what matters.
+2. **Misses are near-misses, but modest.** `pred_sim` is 2.5–3× `rand_sim` everywhere → the model's
+   wrong guesses are semantically related (not random), so the SID/encoder representations are
+   healthy. But absolute `pred_sim ≈ 0.2` is modest → semantic retrieval/SRD would give a **moderate
+   pv-only** bump, and ~nothing for buy (already 96% hit). SRD **deprioritized**.
+
+**The real bottleneck = the behavior head.** The model predicts the right *item* for buy 96% of the
+time but mislabels the *behavior* (defaults to pv), which is what tanks t3_buy_R and joint_buy. SID
+and behavior are nearly **decoupled** in the model's predictions. → invest in **calibrated behavior
+focal** (`focal_gamma` ↓ from 2.0, optional `focal_alpha`), not encoder/SID changes.
+
+### 12d. Behavior-focal γ sweep (user_drop data)
+
+| γ | buy_F1 | buy_R | buy_P | pv_R | BehAcc | joint_R@10 |
+|---|--------|-------|-------|------|--------|-----------|
+| 0 (plain CE) | 0.207 | 0.141 | 0.388 | 0.907 | 0.864 | 0.186 |
+| **1** | **0.341** | **0.390** | 0.304 | 0.346 | 0.361 | 0.195 |
+| 2 | 0.263 | 0.298 | 0.235 | 0.145 | 0.173 | 0.195 |
+
+γ=1 **dominates** γ=2 (better buy P/R/F1 AND pv) and has the best buy_F1 overall (buy_F1 is concave
+in γ, peak ≈1). Two standing facts: (1) **test-wide joint_Rec is flat (~0.19) and will NOT move**
+from behavior focal — it's pv-dominated and we're trading pv↔buy; track `t3_behavior_*_buy`, not
+joint_Rec. (2) At γ=1 **cart/fav are massively over-predicted** (recall ~0.64/0.68 but precision
+~0.03/0.06) — wasted capacity; the next lever is selective `focal_alpha` (boost buy, damp cart/fav).
+
+α sweep at γ=1 (indexed [pv,fav,cart,buy]): α_buy=1 → buy_F1 **0.341** (best); α_buy=1.3 → 0.303;
+α_buy=2 → 0.292 (recall 0.53, precision 0.20). Raising α_buy just trades precision for recall →
+buy_F1 falls. **cart/fav precision ≈ their base rates in every run = unlearnable behaviors; only
+buy responds.** Conclusion: **behavior focal is exhausted** (buy_F1 ceiling ≈0.34, joint flat).
+
+### 12e. Two-View Semantic Alignment + Retrieval (implemented, NOT yet run)
+
+Rationale from §12c: misses are **near-misses** (pred_sim 2.5–3× random) but modest, and the
+aggregate joint_Rec (pv-dominated, stuck 0.19) is the only thing left to move — buy SID is solved,
+behavior focal is exhausted. Encoder-input 2-view (BMDV) failed and isn't the bottleneck; this puts
+the 2-view on the **output/retrieval** side instead (the one pipeline stage never touched).
+
+Plan (both halves needed; see §6 "Two-View Semantic Alignment + Retrieval" for the switches):
+1. **Train** two heads to predict next item's `(v_t=e_f+e_t, v_i=e_f+e_i)` from the decoder
+   item-summary hidden state; MSE to stop-grad target (`use_semantic_align`, `semantic_align_weight`).
+2. **Infer** widen `top_k_for_generation` to ~50 and **rerank** the pool by cosine of predicted
+   `(q_t,q_i)` to candidates' `(v_t,v_i)`, blended with decoder score (`use_semantic_rerank`,
+   `rerank_weight`). Evaluator takes top-10 by the blended score.
+
+Experiment recipe (isolates the rerank effect):
+- Train: `use_semantic_align=true top_k_for_generation=50` (+ existing best data/loss config).
+- Compare at test: `use_semantic_rerank=false` (wide-pool baseline) vs `=true` (rerank), same pool.
+- Read `test/t3_recall_10` (aggregate joint) and `test/t2_recall_10`. Sweep `rerank_weight` (0.3–1.0).
+- If the rerank pool ceiling bites (GT not in top-50), escalate to dense catalog retrieval; if MSE
+  align is too weak, upgrade to a contrastive loss (in-batch negatives).
+Honest expectation: near-miss signal is real but modest (pred_sim ≈0.19) → a meaningful nudge on the
+aggregate metric, not a jump. A null result (rerank ≈ baseline) is itself informative (misses not
+recoverable from the pool → the ceiling is genuine pv unpredictability, not scoring).
+
+**Result — MSE align + rerank (userdrop, pool=50):**
+- wide-pool baseline (align on, rerank off): t1_Rec 0.940, **t3_Rec@10 0.207** (pool 50 lifts joint
+  from ~0.19 → 0.207, as expected; this is the reference).
+- rerank w=0.5: t1_Rec **0.759**, t3_Rec@10 **0.175** — rerank **HURT**. Probe shows GT is in the
+  50-pool 98.6% of the time but the rerank pushes it out of the top-10. Not a plumbing bug (query
+  hidden state train↔infer consistent, table/broadcast/direction checked); the semantic query is
+  **weaker than the decoder ranking**, and min-max blend at 0.5 injects that weak signal over a good
+  order. Root causes: (a) views dominated by shared `e_f` → cosine barely discriminates; (b) **MSE
+  trains proximity, not ranking** — never optimized what rerank needs.
+
+**Retry — contrastive align (`align_loss_type=contrastive`).** InfoNCE trains the query to rank GT
+above in-batch negatives (cosine/temp, false-neg SID mask) — matches the rerank geometry and forces
+discriminative structure. Scripts: `train_tiger_mb_twoview_contrastive_{baseline,rerank}.sbatch`
+(matched pair, `semantic_align_weight=0.5` so InfoNCE doesn't swamp the SID CE). Compare rerank vs
+its OWN contrastive baseline. If contrastive rerank still ≤ baseline → the decoder ranking is the
+ceiling for pool reranking; escalate to dense catalog retrieval or accept pv unpredictability.

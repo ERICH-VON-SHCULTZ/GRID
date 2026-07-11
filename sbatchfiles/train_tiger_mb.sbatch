@@ -8,7 +8,7 @@
 #SBATCH --mem=200GB
 #SBATCH --gres=gpu:a100:1
 #SBATCH --job-name=train_tiger_mb
-#SBATCH --output=/scratch/yw8866/GRID/expoutfile/tiger_mb_2048_1024_mdsid_codebookinit.out
+#SBATCH --output=/scratch/yw8866/GRID/expoutfile/userdrop_focal_gaama1_alpha1_3.out
 
 module purge
 
@@ -27,7 +27,11 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 python /scratch/yw8866/GRID/src/train.py experiment=tiger_mb_train_flat \
     codebook_init_path=/scratch/yw8866/logs/train/runs/2026-05-06/2048_1024/checkpoints/checkpoint_000_010000.ckpt \
-    data_dir=/scratch/yw8866/rec-tmall/tfrecords_mb \
+    data_dir=/scratch/yw8866/rec-tmall/tfrecords_mb_userdrop \
     semantic_id_path=/scratch/yw8866/logs/inference/runs/2026-05-06/2048_1024/pickle/semantic_ids.pt \
+    probe_sid_distance=True \
+    focal_behavior=True \
+    focal_gamma=1.0 \
+    focal_alpha=[1.0,0.5,0.5,2.0]\
     num_hierarchies=3
 "

@@ -322,6 +322,14 @@ class BehaviorAccuracy(CustomMeanReductionMetric):
         self.total_values += total
 
 
+class ScalarMeanMetric(CustomMeanReductionMetric):
+    """Running mean accumulated from (value_sum, count) updates; DDP-safe gather."""
+
+    def update(self, value_sum: float, count: int) -> None:
+        self.metric_values += value_sum
+        self.total_values += count
+
+
 class BehaviorClassMetric(torchmetrics.Metric):
     """
     Per-behavior precision / recall / F1 for the predicted behavior class.
@@ -395,6 +403,14 @@ class MultiBehaviorSIDRetrievalEvaluator(Evaluator):
         t3_behavior_{precision,recall,f1}_{pv,fav,cart,buy}
                                  — free generation → per-behavior classification metrics
                                    (best-beam predicted behavior vs GT behavior, one-vs-rest)
+        probe_{group}_miss_{pred_sim,rand_sim,frac}   (only if probe_sid_distance=True)
+                                 — semantic near-miss probe (see model._update_sid_probe):
+                                   among MISS cases, cosine similarity of the best-beam
+                                   predicted SID to the GT SID in the e_f+e_t / e_f+e_i
+                                   reconstruction space, vs a random in-batch item, and the
+                                   per-group miss fraction. group ∈ {overall,pv,fav,cart,buy}.
+                                   The model computes the cosine sims (it holds the embedding
+                                   table) and updates these accumulators.
     """
 
     # Default behavior id -> short name used in per-behavior metric names.
@@ -406,6 +422,7 @@ class MultiBehaviorSIDRetrievalEvaluator(Evaluator):
         top_k_list: List[int],
         buy_behavior_id: int = 3,
         behavior_names: Dict[int, str] = None,
+        probe_sid_distance: bool = False,
     ):
         def _make(prefix, name, obj):
             return {
@@ -433,6 +450,15 @@ class MultiBehaviorSIDRetrievalEvaluator(Evaluator):
                     sync_on_compute=False,
                     compute_with_cache=False,
                 )
+
+        # Semantic near-miss probe accumulators (filled by the model during eval).
+        self.probe_sid_distance = probe_sid_distance
+        if probe_sid_distance:
+            for group in ["overall"] + list(self.behavior_names.values()):
+                for kind in ("miss_pred_sim", "miss_rand_sim", "miss_frac"):
+                    all_metrics[f"probe_{group}_{kind}"] = ScalarMeanMetric(
+                        sync_on_compute=False, compute_with_cache=False
+                    )
 
         self.buy_behavior_id = buy_behavior_id
         self.metrics = all_metrics

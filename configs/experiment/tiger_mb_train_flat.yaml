@@ -68,6 +68,62 @@ item_pe_max_seq_len: 1024
 use_bmtv: false
 bmtv_max_seq_len: 1024
 
+# Loss rebalancing for the behavior class imbalance (optional, independent switches).
+# focal_behavior: replace plain CE on the behavior head (position 0) with focal loss,
+#   FL = -(1-p_t)^gamma * log(p_t), focusing gradient on hard/rare behaviors (buy/cart/
+#   fav) instead of the dominant pv. focal_gamma is the focusing strength. Helps the
+#   t3 behavior precision/recall/f1 and t3 joint metrics.
+# behavior_weighted_sid: weight each item's SID loss by its TARGET behavior so rare-
+#   behavior (buy) interactions get more SID gradient -> helps buy SID retrieval (t1).
+#   sid_behavior_weights is indexed by behavior id [pv, fav, cart, buy].
+focal_behavior: false
+focal_gamma: 2.0
+# Optional per-class weights for focal loss, indexed by behavior id [pv, fav, cart, buy].
+# null = unweighted (gamma-only). Higher alpha_c => class c contributes more loss.
+# NOTE: alpha cannot rescue pv at high gamma — the (1-p_t)^gamma factor zeros easy pv
+# regardless of alpha; lower gamma is the primary knob to prevent pv collapse.
+focal_alpha: null
+behavior_weighted_sid: false
+sid_behavior_weights:
+- 1.0
+- 3.0
+- 3.0
+- 8.0
+
+# Two-View Semantic Alignment + Retrieval (optional; leverages the MD-RQ-VAE
+# addable property v_t=e_f+e_t≈text latent, v_i=e_f+e_i≈image latent).
+#   use_semantic_align: TRAIN two heads to predict the next item's (v_t, v_i) from the
+#     decoder item-summary hidden state via MSE to a stop-grad target
+#     (loss += semantic_align_weight * align_loss). Requires num_hierarchies == 3.
+#   use_semantic_rerank: at INFERENCE, reorder the free-gen candidate pool by cosine of
+#     the predicted (q_t, q_i) to each candidate's (v_t, v_i). Blend with the decoder
+#     score via rerank_weight (0 = decoder only/baseline, 1 = pure semantic retrieval).
+#   For rerank to help recall@10 the pool must exceed 10 → widen top_k_for_generation
+#   (e.g. 50). Clean ablation: run top_k_for_generation=50 with rerank off (wide-pool
+#   baseline) vs on. Train with use_semantic_align=true first so the heads are learned.
+use_semantic_align: false
+semantic_align_weight: 1.0
+# align_loss_type: 'mse' (regress query to the GT view) or 'contrastive' (InfoNCE — the
+# query must RANK its GT view above in-batch negatives; matches the cosine rerank at
+# inference and forces discriminative, not shared-code, structure). align_temperature is
+# the InfoNCE softmax temperature (contrastive only).
+align_loss_type: mse
+align_temperature: 0.07
+use_semantic_rerank: false
+rerank_weight: 0.5
+# Beam pool size for generation (also the candidate count handed to the evaluator,
+# which takes top-K itself). Default 10; set to e.g. 50 for the rerank experiment.
+top_k_for_generation: 10
+
+# Semantic near-miss probe (eval-only diagnostic; no effect on training).
+# When probe_sid_distance=true, the test/val loop measures, among MISS cases (GT SID
+# tuple not in the top-k generated), the cosine similarity of the best-beam predicted
+# SID to the GT SID in the MD-RQ-VAE reconstruction space (v_t=e_f+e_t, v_i=e_f+e_i),
+# versus a random in-batch item — per behavior + overall. Logs probe_{group}_miss_
+# {pred_sim,rand_sim,frac}. Tells near-miss (pred_sim >> rand_sim, retrieval can help)
+# from genuine unpredictability (pred_sim ≈ rand_sim). Requires num_hierarchies == 3.
+probe_sid_distance: false
+
 task_name: train
 id: ${now:%Y-%m-%d}/${now:%H-%M-%S}
 tags:
@@ -325,6 +381,20 @@ model:
   # BM-TV encoder — mirrors the top-level switches
   use_bmtv: ${use_bmtv}
   bmtv_max_seq_len: ${bmtv_max_seq_len}
+  # Loss rebalancing — mirrors the top-level switches
+  focal_behavior: ${focal_behavior}
+  focal_gamma: ${focal_gamma}
+  focal_alpha: ${focal_alpha}
+  behavior_weighted_sid: ${behavior_weighted_sid}
+  sid_behavior_weights: ${sid_behavior_weights}
+  # Two-View semantic align + rerank — mirrors the top-level switches
+  use_semantic_align: ${use_semantic_align}
+  semantic_align_weight: ${semantic_align_weight}
+  align_loss_type: ${align_loss_type}
+  align_temperature: ${align_temperature}
+  use_semantic_rerank: ${use_semantic_rerank}
+  rerank_weight: ${rerank_weight}
+  top_k_for_generation: ${top_k_for_generation}
 
 callbacks:
   model_checkpoint:
@@ -426,6 +496,7 @@ eval:
   evaluator:
     _target_: src.components.eval_metrics.MultiBehaviorSIDRetrievalEvaluator
     buy_behavior_id: 3
+    probe_sid_distance: ${probe_sid_distance}
     top_k_list:
     - 5
     - 10
