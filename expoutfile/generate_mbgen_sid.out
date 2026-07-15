@@ -1,0 +1,107 @@
+INFO:    FUSE2FS (3): Warning: Mounting unchecked fs, running e2fsck is recommended.
+[14:21:51] config:
+seed: 42
+num_workers: 20
+modality_dim: 1152
+text_embedding_path: /scratch/yw8866/rec-tmall/text_embedding/siglip2-so400m-patch14-384.npy
+text_id_map_path: /scratch/yw8866/rec-tmall/text_embedding/siglip2-so400m-patch14-384_ids.pkl
+image_embedding_path: /scratch/yw8866/rec-tmall/image_embedding/siglip2-so400m-patch14-384.npy
+image_id_map_path: /scratch/yw8866/rec-tmall/image_embedding/siglip2-so400m-patch14-384_ids.pkl
+num_id1: 2048
+num_id2: 2048
+expand_id2: false
+qae:
+  hidden:
+  - 2048
+  - 1024
+  - 512
+  - 256
+  latent_dim: 32
+  dropout: 0.0
+  beta: 0.05
+  lr: 0.001
+  batch_size: 2048
+  epochs: 32
+  init_sample: 300000
+  encode_batch_size: 65536
+output_dir: /scratch/yw8866/logs/inference/runs/mbgen_sid/2048_2048
+num_items: 8133508
+
+[14:21:52] device: cuda
+[14:21:52] loading id maps ...
+[14:21:58] items: text=5,409,793 image=5,409,787 intersection=5,409,787
+[14:22:00] gathering text embeddings ...
+[14:22:07]     gathered 200,000/5,409,787 from siglip2-so400m-patch14-384.npy
+[14:22:30]     gathered 2,200,000/5,409,787 from siglip2-so400m-patch14-384.npy
+[14:22:55]     gathered 4,200,000/5,409,787 from siglip2-so400m-patch14-384.npy
+[14:23:09] gathering image embeddings ...
+[14:23:16]     gathered 200,000/5,409,787 from siglip2-so400m-patch14-384.npy
+[14:23:37]     gathered 2,200,000/5,409,787 from siglip2-so400m-patch14-384.npy
+[14:23:58]     gathered 4,200,000/5,409,787 from siglip2-so400m-patch14-384.npy
+[14:24:25] assembled embedding matrix (5409787, 2304) (49.9 GB)
+[14:24:25] standardising (per-feature mean/std) ...
+[14:25:12] QAE: QAE(
+  (encoder): MLP(
+    (net): Sequential(
+      (0): Linear(in_features=2304, out_features=2048, bias=True)
+      (1): ReLU()
+      (2): Linear(in_features=2048, out_features=1024, bias=True)
+      (3): ReLU()
+      (4): Linear(in_features=1024, out_features=512, bias=True)
+      (5): ReLU()
+      (6): Linear(in_features=512, out_features=256, bias=True)
+      (7): ReLU()
+      (8): Linear(in_features=256, out_features=32, bias=True)
+    )
+  )
+  (vq): EMAVectorQuantizer()
+  (decoder): MLP(
+    (net): Sequential(
+      (0): Linear(in_features=32, out_features=256, bias=True)
+      (1): ReLU()
+      (2): Linear(in_features=256, out_features=512, bias=True)
+      (3): ReLU()
+      (4): Linear(in_features=512, out_features=1024, bias=True)
+      (5): ReLU()
+      (6): Linear(in_features=1024, out_features=2048, bias=True)
+      (7): ReLU()
+      (8): Linear(in_features=2048, out_features=2304, bias=True)
+    )
+  )
+)
+[14:25:13] kmeans-initialising codebook (2048 codes on 300,000 samples) ...
+[14:26:53] epoch 1/32 loss=0.8550 rec=0.8395 commit=0.3103 active_codes=1401/2048
+[14:27:57] epoch 2/32 loss=0.7857 rec=0.7637 commit=0.4401 active_codes=577/2048
+[14:29:00] epoch 3/32 loss=0.7650 rec=0.7397 commit=0.5048 active_codes=747/2048
+[14:30:04] epoch 4/32 loss=0.7522 rec=0.7246 commit=0.5529 active_codes=877/2048
+[14:31:08] epoch 5/32 loss=0.7435 rec=0.7145 commit=0.5797 active_codes=974/2048
+[14:32:11] epoch 6/32 loss=0.7376 rec=0.7077 commit=0.5996 active_codes=1059/2048
+[14:33:15] epoch 7/32 loss=0.7327 rec=0.7020 commit=0.6131 active_codes=1141/2048
+[14:34:18] epoch 8/32 loss=0.7286 rec=0.6974 commit=0.6254 active_codes=1211/2048
+[14:35:21] epoch 9/32 loss=0.7253 rec=0.6934 commit=0.6372 active_codes=1277/2048
+[14:36:25] epoch 10/32 loss=0.7224 rec=0.6901 commit=0.6456 active_codes=1342/2048
+[14:37:28] epoch 11/32 loss=0.7197 rec=0.6872 commit=0.6512 active_codes=1393/2048
+[14:38:31] epoch 12/32 loss=0.7174 rec=0.6845 commit=0.6576 active_codes=1449/2048
+[14:39:35] epoch 13/32 loss=0.7154 rec=0.6821 commit=0.6652 active_codes=1486/2048
+[14:40:38] epoch 14/32 loss=0.7136 rec=0.6800 commit=0.6721 active_codes=1536/2048
+[14:41:41] epoch 15/32 loss=0.7118 rec=0.6780 commit=0.6769 active_codes=1584/2048
+[14:42:45] epoch 16/32 loss=0.7102 rec=0.6762 commit=0.6812 active_codes=1622/2048
+[14:43:49] epoch 17/32 loss=0.7086 rec=0.6744 commit=0.6852 active_codes=1661/2048
+[14:44:52] epoch 18/32 loss=0.7071 rec=0.6727 commit=0.6900 active_codes=1699/2048
+[14:45:55] epoch 19/32 loss=0.7058 rec=0.6711 commit=0.6942 active_codes=1732/2048
+[14:46:58] epoch 20/32 loss=0.7046 rec=0.6697 commit=0.6981 active_codes=1766/2048
+[14:48:02] epoch 21/32 loss=0.7033 rec=0.6683 commit=0.7006 active_codes=1801/2048
+[14:49:05] epoch 22/32 loss=0.7022 rec=0.6670 commit=0.7035 active_codes=1836/2048
+[14:50:09] epoch 23/32 loss=0.7011 rec=0.6658 commit=0.7061 active_codes=1876/2048
+[14:51:13] epoch 24/32 loss=0.7000 rec=0.6646 commit=0.7081 active_codes=1912/2048
+[14:52:16] epoch 25/32 loss=0.6990 rec=0.6635 commit=0.7101 active_codes=1946/2048
+[14:53:19] epoch 26/32 loss=0.6981 rec=0.6625 commit=0.7126 active_codes=1975/2048
+[14:54:22] epoch 27/32 loss=0.6972 rec=0.6615 commit=0.7150 active_codes=2003/2048
+[14:55:25] epoch 28/32 loss=0.6964 rec=0.6605 commit=0.7174 active_codes=2030/2048
+[14:56:29] epoch 29/32 loss=0.6956 rec=0.6596 commit=0.7192 active_codes=2048/2048
+[14:57:32] epoch 30/32 loss=0.6949 rec=0.6588 commit=0.7224 active_codes=2048/2048
+[14:58:35] epoch 31/32 loss=0.6944 rec=0.6581 commit=0.7260 active_codes=2048/2048
+[14:59:38] epoch 32/32 loss=0.6939 rec=0.6574 commit=0.7300 active_codes=2048/2048
+[14:59:38] encoding all items (level-1 code + residual) ...
+[14:59:49] conditional kmeans over 2048 non-empty groups ...
+[2026-07-11T16:32:13.788] error: *** JOB 13334872 ON ga041 CANCELLED AT 2026-07-11T16:32:13 DUE to SIGNAL Terminated ***

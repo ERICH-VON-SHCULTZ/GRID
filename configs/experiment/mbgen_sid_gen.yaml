@@ -1,0 +1,68 @@
+# MBGen (MMMB-Genrec) semantic-ID generation config.
+#
+# Reproduces the QAE_Kmeans tokenizer of /scratch/yw8866/MMMB-Genrec (QAE VQ level-1 +
+# conditional residual KMeans level-2 => 2 tokens/item) on GRID's Tmall catalogue, and
+# writes a semantic_ids.pt in the layout tiger_mb consumes (column == item_id).
+#
+# This is a PLAIN yaml read by src/data/generate_mbgen_sid.py via OmegaConf (NOT hydra /
+# lightning), because MBGen's tokenizer does not map onto GRID's clustering modules.
+# Override any field on the CLI, e.g.:
+#   python src/data/generate_mbgen_sid.py --config configs/experiment/mbgen_sid_gen.yaml \
+#       qae.epochs=60 num_id2=1024
+
+seed: 42
+num_workers: 20
+
+# auto | cuda | cpu. Only QAE training uses the GPU; the embedding gather and the level-2
+# conditional KMeans are CPU/IO-bound regardless. For a CPU-only run (no GPU queue / no
+# walltime cap), set device=cpu and lower qae.train_sample -- see generate_mbgen_sid_cpu.sbatch.
+device: auto
+
+# --- Item embeddings: concat SigLIP text + image (2304-d), aligned by item_id ---
+modality_dim: 1152          # per-modality SigLIP dim; QAE input_dim = 2 * modality_dim
+text_embedding_path: /scratch/yw8866/rec-tmall/text_embedding/siglip2-so400m-patch14-384.npy
+text_id_map_path: /scratch/yw8866/rec-tmall/text_embedding/siglip2-so400m-patch14-384_ids.pkl
+image_embedding_path: /scratch/yw8866/rec-tmall/image_embedding/siglip2-so400m-patch14-384.npy
+image_id_map_path: /scratch/yw8866/rec-tmall/image_embedding/siglip2-so400m-patch14-384_ids.pkl
+
+# --- SID geometry ---
+num_id1: 2048               # level-1 QAE codebook size  (SID level 0 vocab)
+num_id2: 2048               # level-2 clusters per level-1 group (SID level 1 vocab)
+expand_id2: false           # false => local level-2 codes in [0, num_id2); keep vocab small
+# MBGen's uniqueness mechanism: append a 3rd token counting items within each (id1,id2)
+# bucket, so every item gets a distinct 3-token SID (a TIGER-style dedup token). This is
+# how MBGen's QAE_Kmeans_item_Tokenizer actually assigns IDs. true => [3,N] tensor,
+# num_hierarchies=3, level-2 vocab = largest bucket (printed at the end of the run).
+# false => pure 2-token [2,N] (collisions NOT resolved).
+add_dedup_token: true
+
+# --- QAE (level-1 autoencoder + EMA-VQ codebook) ---
+qae:
+  hidden: [2048, 1024, 512, 256]   # encoder widths; decoder is the reverse
+  latent_dim: 32
+  dropout: 0.0
+  beta: 0.05                # commitment-loss weight
+  lr: 0.001                 # Adagrad
+  # Keep this LARGE. The EMA codebook's cluster_size settles at a sum equal to the batch
+  # size, so a small batch starves every code (<1 count each) and degenerates the
+  # codebook. 2048 is MBGen's own value. It is NOT the cause of any OOM — the earlier
+  # OOM was an autograd-graph leak in the EMA update, now fixed.
+  batch_size: 2048
+  epochs: 32
+  init_sample: 300000       # subsample for codebook kmeans-init
+  encode_batch_size: 65536
+  # Fit the QAE on this many sampled items (null = all 5.4M). ALL items are still encoded
+  # afterwards, so this only trades autoencoder fit for wall time -- it is the main knob
+  # that makes a CPU-only run feasible. 1-2M is plenty for the codebook to converge.
+  train_sample: null
+
+# --- Output ---
+# semantic_ids.pt + mbgen_sid_artifacts.pt land here. Point tiger_mb at the former.
+output_dir: /scratch/yw8866/logs/inference/runs/mbgen_sid/2048_2048
+# Reuse <output_dir>/encode_cache.pt (items + id1 + residual + codebook) if present, so a
+# re-run skips the 50GB gather / QAE training / encode and goes straight to level-2 KMeans.
+# Set false (or delete the file) to force a full rebuild after changing any QAE knob.
+use_encode_cache: true
+# Minimum column count of the [2, N] tensor (floor == existing MD-RQ-VAE tensor width so
+# any item_id referenced by the tfrecords stays in range). Grown to max item_id+1 if larger.
+num_items: 8133508

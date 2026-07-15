@@ -1,0 +1,102 @@
+[20:42:33] config:
+seed: 42
+num_workers: 48
+device: cpu
+modality_dim: 1152
+text_embedding_path: /scratch/yw8866/rec-tmall/text_embedding/siglip2-so400m-patch14-384.npy
+text_id_map_path: /scratch/yw8866/rec-tmall/text_embedding/siglip2-so400m-patch14-384_ids.pkl
+image_embedding_path: /scratch/yw8866/rec-tmall/image_embedding/siglip2-so400m-patch14-384.npy
+image_id_map_path: /scratch/yw8866/rec-tmall/image_embedding/siglip2-so400m-patch14-384_ids.pkl
+num_id1: 2048
+num_id2: 2048
+expand_id2: false
+add_dedup_token: true
+qae:
+  hidden:
+  - 2048
+  - 1024
+  - 512
+  - 256
+  latent_dim: 32
+  dropout: 0.0
+  beta: 0.05
+  lr: 0.001
+  batch_size: 2048
+  epochs: 32
+  init_sample: 300000
+  encode_batch_size: 65536
+  train_sample: 1500000
+output_dir: /scratch/yw8866/logs/inference/runs/mbgen_sid/2048_2048
+use_encode_cache: true
+num_items: 8133508
+
+[20:42:33] device: cpu (torch threads=48)
+[20:42:33] loading stage-1 cache: /scratch/yw8866/logs/inference/runs/mbgen_sid/2048_2048/encode_cache.pt (skipping gather / QAE / encode)
+[20:42:40] cached: 5,409,787 items, residual (5409787, 32)
+[20:42:41] conditional kmeans over 1290 non-empty groups ...
+[20:49:26]     25/1290 groups clustered (6.7 min elapsed, ~341.2 min left)
+[20:49:29]     50/1290 groups clustered (6.8 min elapsed, ~168.4 min left)
+[20:49:31]     75/1290 groups clustered (6.8 min elapsed, ~110.7 min left)
+[20:49:35]     100/1290 groups clustered (6.9 min elapsed, ~82.0 min left)
+[20:49:37]     125/1290 groups clustered (6.9 min elapsed, ~64.6 min left)
+[20:49:39]     150/1290 groups clustered (7.0 min elapsed, ~53.0 min left)
+[20:49:42]     175/1290 groups clustered (7.0 min elapsed, ~44.7 min left)
+[20:49:45]     200/1290 groups clustered (7.1 min elapsed, ~38.5 min left)
+[20:49:48]     225/1290 groups clustered (7.1 min elapsed, ~33.7 min left)
+[20:49:50]     250/1290 groups clustered (7.2 min elapsed, ~29.7 min left)
+[20:49:53]     275/1290 groups clustered (7.2 min elapsed, ~26.6 min left)
+[20:49:56]     300/1290 groups clustered (7.2 min elapsed, ~23.9 min left)
+[20:49:58]     325/1290 groups clustered (7.3 min elapsed, ~21.6 min left)
+[20:50:00]     350/1290 groups clustered (7.3 min elapsed, ~19.6 min left)
+[20:50:02]     375/1290 groups clustered (7.3 min elapsed, ~17.9 min left)
+[20:50:04]     400/1290 groups clustered (7.4 min elapsed, ~16.4 min left)
+[20:50:07]     425/1290 groups clustered (7.4 min elapsed, ~15.1 min left)
+[20:50:10]     450/1290 groups clustered (7.5 min elapsed, ~14.0 min left)
+[20:50:12]     475/1290 groups clustered (7.5 min elapsed, ~12.9 min left)
+[20:50:14]     500/1290 groups clustered (7.6 min elapsed, ~11.9 min left)
+[20:50:17]     525/1290 groups clustered (7.6 min elapsed, ~11.1 min left)
+[20:50:19]     550/1290 groups clustered (7.6 min elapsed, ~10.3 min left)
+[20:50:22]     575/1290 groups clustered (7.7 min elapsed, ~9.5 min left)
+[20:50:24]     600/1290 groups clustered (7.7 min elapsed, ~8.9 min left)
+[20:50:27]     625/1290 groups clustered (7.8 min elapsed, ~8.3 min left)
+[20:50:29]     650/1290 groups clustered (7.8 min elapsed, ~7.7 min left)
+[20:50:32]     675/1290 groups clustered (7.9 min elapsed, ~7.2 min left)
+[20:50:34]     700/1290 groups clustered (7.9 min elapsed, ~6.6 min left)
+[20:50:36]     725/1290 groups clustered (7.9 min elapsed, ~6.2 min left)
+[20:50:38]     750/1290 groups clustered (8.0 min elapsed, ~5.7 min left)
+[20:50:40]     775/1290 groups clustered (8.0 min elapsed, ~5.3 min left)
+[20:50:43]     800/1290 groups clustered (8.0 min elapsed, ~4.9 min left)
+[20:50:45]     825/1290 groups clustered (8.1 min elapsed, ~4.5 min left)
+[20:50:47]     850/1290 groups clustered (8.1 min elapsed, ~4.2 min left)
+[20:50:48]     875/1290 groups clustered (8.1 min elapsed, ~3.8 min left)
+[20:50:50]     900/1290 groups clustered (8.1 min elapsed, ~3.5 min left)
+[20:50:52]     925/1290 groups clustered (8.2 min elapsed, ~3.2 min left)
+[20:50:54]     950/1290 groups clustered (8.2 min elapsed, ~2.9 min left)
+[20:50:55]     975/1290 groups clustered (8.2 min elapsed, ~2.7 min left)
+[20:50:56]     1000/1290 groups clustered (8.2 min elapsed, ~2.4 min left)
+[20:50:57]     1025/1290 groups clustered (8.3 min elapsed, ~2.1 min left)
+[20:50:58]     1050/1290 groups clustered (8.3 min elapsed, ~1.9 min left)
+[20:51:01]     1075/1290 groups clustered (8.3 min elapsed, ~1.7 min left)
+[20:51:05]     1100/1290 groups clustered (8.4 min elapsed, ~1.4 min left)
+[20:51:07]     1125/1290 groups clustered (8.4 min elapsed, ~1.2 min left)
+[20:51:10]     1150/1290 groups clustered (8.5 min elapsed, ~1.0 min left)
+[20:51:13]     1175/1290 groups clustered (8.5 min elapsed, ~0.8 min left)
+[20:51:17]     1200/1290 groups clustered (8.6 min elapsed, ~0.6 min left)
+[20:51:19]     1225/1290 groups clustered (8.6 min elapsed, ~0.5 min left)
+[20:51:23]     1250/1290 groups clustered (8.7 min elapsed, ~0.3 min left)
+[20:51:24]     1275/1290 groups clustered (8.7 min elapsed, ~0.1 min left)
+[20:51:26]     1290/1290 groups clustered (8.7 min elapsed, ~0.0 min left)
+[20:51:29] dedup token: max bucket = 106 items sharing one (id1,id2) -> level-2 vocab must be >= 106
+[20:51:29] writing SID tensor [3, 8,133,508] (column == item_id) ...
+[20:51:30] ============================================================
+[20:51:30] VERIFICATION
+[20:51:30]   items: 5,409,787   SID levels: 3
+[20:51:30]   level 0 active codes: 1290   (max id 2045)
+[20:51:30]   level 1 active codes: 2048   (max id 2047)
+[20:51:30]   level 2 active codes: 106   (max id 105)
+[20:51:30]   unique SID tuples: 5,409,787   collision rate: 0.0000
+[20:51:30]   uniqueness (unique/items): 1.0000
+[20:51:30] ============================================================
+[20:51:30] => train with: num_hierarchies=3 codebook_sizes=[2048, 2048, 106]
+[20:51:30] saved: /scratch/yw8866/logs/inference/runs/mbgen_sid/2048_2048/semantic_ids.pt  shape=(3, 8133508) dtype=torch.int64
+[20:51:31] done.

@@ -505,3 +505,94 @@ discriminative structure. Scripts: `train_tiger_mb_twoview_contrastive_{baseline
 (matched pair, `semantic_align_weight=0.5` so InfoNCE doesn't swamp the SID CE). Compare rerank vs
 its OWN contrastive baseline. If contrastive rerank still ≤ baseline → the decoder ranking is the
 ceiling for pool reranking; escalate to dense catalog retrieval or accept pv unpredictability.
+
+## 13. MBGen tokenizer baseline (alternative SID, not GRID's MD-RQ-VAE)
+
+Goal: a clean **tokenizer ablation** — feed the *same* multi-behavior TIGER the semantic IDs
+produced by MMMB-Genrec's tokenizer (referred to as **MBGen** here) instead of GRID's 3-level
+MD-RQ-VAE SIDs. Identical data, identical T5, only the SID assignment changes.
+
+**MBGen SID scheme (3 tokens/item), faithfully re-implemented in `src/data/generate_mbgen_sid.py`:**
+- **Level 1 — QAE:** MLP encoder (2304→2048→1024→512→256→32) → single **EMA-VQ codebook**
+  (`num_id1=2048`, kmeans-init, latent 32) → MLP decoder. Loss = MSE(recon) + `beta`·commit.
+  Nearest code = `id1`; `residual = encoded − quantized`.
+- **Level 2 — conditional KMeans:** group items by `id1`; run KMeans(`num_id2=2048`) on the
+  residuals **within each level-1 group** (local codes, `expand_id2=false`). Guard: groups with
+  ≤ num_id2 items get a degenerate one-cluster-per-item assignment (sklearn can't do k>n).
+- **Level 3 — dedup counter (`add_dedup_token=true`, MBGen's UNIQUENESS mechanism):** a running
+  index over items sharing the same `(id1,id2)` bucket → guarantees a distinct 3-token SID per
+  item (a TIGER-style dedup token; see MBGen `QAE_Kmeans_item_Tokenizer.__init__`). Level-3 vocab
+  = largest bucket (printed at end of run). This is why the QAE codebook collapsing to <2048
+  active codes is NOT a uniqueness problem in MBGen — the 3rd token resolves all collisions; a
+  weaker QAE just makes buckets (and the dedup vocab) larger. The generator prints the exact
+  `num_hierarchies=3 codebook_sizes=[2048, <max id2+1>, <max bucket+1>]` line to copy into the
+  training run. Dead-code revival is NOT MBGen's mechanism and is intentionally absent.
+
+**Deliberate deviations from MBGen upstream (all scale-forced):** input = concat(SigLIP text,
+image)=2304-d standardised (MBGen uses one opaque `embedding.pkl`); codebook kmeans-init on a
+300k subsample; MiniBatchKMeans instead of full KMeans. Codebook sizes **2048×2048** chosen to
+match GRID's ~4.19M unique-SID capacity (vs MBGen's tiny 96×96, tuned for ~10k-item catalogs).
+
+**Structural caveat:** a 2-token scheme has a hard collision ceiling on 5.4M items — max unique ≈
+Σ_group min(nₘ, num_id2). With avg group ≈2640 > 2048, expect collision in the same ballpark as
+GRID's 36% (that's the point of capacity-matching). Pure MBGen sizes would be ~99% collision.
+
+**Output:** `[2, N]` int64 tensor, column == item_id, gaps/modality-missing items = `[0,0]`
+(exact layout of the MD-RQ-VAE `semantic_ids.pt`; column indexing verified against
+`map_sparse_id_to_semantic_id`). Item set = text∩image id-map intersection (the multimodal
+MD-RQ-VAE required both modalities too, so this covers the same ~5.4M items). Written to
+`/scratch/yw8866/logs/inference/runs/mbgen_sid/2048_2048/{semantic_ids.pt,mbgen_sid_artifacts.pt}`.
+
+**Files:**
+- `src/data/generate_mbgen_sid.py` — the tokenizer (standalone; not hydra/lightning).
+- `configs/experiment/mbgen_sid_gen.yaml` — all knobs (read via OmegaConf; CLI dotlist overrides).
+- `sbatchfiles/generate_mbgen_sid.sbatch` — runs the generator (A100, 300GB RAM, ~50GB matrix).
+- `sbatchfiles/train_tiger_mb_mbgen_baseline.sbatch` — trains tiger_mb on the MBGen SIDs.
+
+**How to run (order matters):**
+1. `sbatch sbatchfiles/generate_mbgen_sid.sbatch` → produces `semantic_ids.pt`; check the
+   VERIFICATION block in `expoutfile/generate_mbgen_sid.out` (active codes, collision rate).
+2. `sbatch sbatchfiles/train_tiger_mb_mbgen_baseline.sbatch` — uses `num_hierarchies=3`
+   (id1, id2, dedup), `codebook_sizes` from the generator printout, all GRID extensions OFF
+   (BM-TV/two-view/probe need the MD-RQ-VAE geometry; codebook-init needs its ckpt). Compare
+   `test/t*_recall_*` vs the MD-RQ-VAE runs. This uses the plain **tiger** model on MBGen SIDs.
+
+## 14. MBGen PBA model (Position & Behavior Aware architecture)
+
+Goal: the complementary ablation to §13 — same SIDs, but MBGen's **model** instead of GRID's
+tiger. Isolates the architecture. Faithful port of `MMMB-Genrec/model/PBA_transformer.py`.
+
+**What PBA is** (two ideas, both FFN-level; see the module docstring):
+- **Position-routed experts (deterministic MoE):** each within-item token position gets its
+  own FFN expert — expert 0 = special (user/BOS/pad), 1 = behavior token, 2..(1+H) = the H SID
+  levels. Routing is by *position*, not a learned gate ⇒ no router z-loss.
+- **Behavior injection:** on selected layers, the item's behavior embedding is concatenated
+  onto the FFN input, conditioning every SID token on its behavior.
+
+**How it's built (`src/models/modules/semantic_id/pba_generation_model.py`):** subclass of
+`SemanticIDMultiBehaviorEncoderDecoder` that swaps each T5 `T5LayerFF` for `PBAFeedForward`
+(position-routed experts + optional behavior injection). Everything else — SID embedding
+tables, the (1+H) flat sequence, beam search, `model_step`, `MultiBehaviorSIDRetrievalEvaluator`
+— is **inherited unchanged**, so `test/t1_* / t2_* / t3_*` are directly comparable to the tiger
+runs. The T5 block FFN can't see token positions, so the parent computes the per-token
+position/behavior indices (matching MBGen's PBAEncoder/DecoderRouter) and stashes them on every
+`PBAFeedForward` before each backbone call (`_encoder_indices` / `_decoder_indices`).
+
+**Faithfulness / deliberate adaptations:** ideas ported exactly (position experts, behavior
+injection, MBGen ijcai layer config — encoder dense, all 4 decoder layers sparse, inject on
+layers 0-1, `behavior_embedding_dim=64`, `d_model=256`, `d_ff=512`). Adaptations forced by
+GRID integration: T5 backbone instead of HF SwitchTransformers (same encoder-decoder + MoE-FFN,
+different plumbing); no SEP token / no user token (GRID `num_user_bins=null`, matching the tiger
+baseline — position routing carries the structure); `shared_expert` and MBGen's own generation
+loop are not used (GRID's beam search is reused for metric comparability). DDP-safe with plain
+`ddp`: the training decoder always runs the full [BOS, beh, sid0..H] block, so every decoder
+expert receives tokens every step (no unused params); keep `sparse_layers_encoder=[]` (encoder
+expert 0 would otherwise see only masked pad tokens and go unused).
+
+**Files:** `pba_generation_model.py`, `configs/experiment/tiger_mb_pba_flat.yaml`
+(model=`PBAMultiBehaviorEncoderDecoder`, `mlp_layers: null`, `codebook_sizes: null`, PBA params),
+`sbatchfiles/train_tiger_mb_pba.sbatch`.
+
+**Run:** after the MBGen SIDs exist, `sbatch sbatchfiles/train_tiger_mb_pba.sbatch`. Compare
+`test/t*` against both the tiger-on-MBGen-SID baseline (§13, isolates model) and the tiger-on-
+MD-RQ-VAE baseline (isolates tokenizer).
