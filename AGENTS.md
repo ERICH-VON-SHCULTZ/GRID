@@ -591,8 +591,108 @@ expert 0 would otherwise see only masked pad tokens and go unused).
 
 **Files:** `pba_generation_model.py`, `configs/experiment/tiger_mb_pba_flat.yaml`
 (model=`PBAMultiBehaviorEncoderDecoder`, `mlp_layers: null`, `codebook_sizes: null`, PBA params),
-`sbatchfiles/train_tiger_mb_pba.sbatch`.
+`sbatchfiles/train_tiger_mb_pba.sbatch` (PBA on MBGen SID) and
+`sbatchfiles/train_tiger_mb_pba_mdrqvae.sbatch` (PBA on the MD-RQ-VAE 2048_1024 SID). The same
+yaml drives both; only `semantic_id_path` + `codebook_sizes` differ (CLI overrides).
 
-**Run:** after the MBGen SIDs exist, `sbatch sbatchfiles/train_tiger_mb_pba.sbatch`. Compare
-`test/t*` against both the tiger-on-MBGen-SID baseline (§13, isolates model) and the tiger-on-
-MD-RQ-VAE baseline (isolates tokenizer).
+**The 2x2 (model x tokenizer), all sharing the same evaluator/metrics:**
+| | MD-RQ-VAE SID | MBGen SID |
+|---|---|---|
+| **tiger model** | existing baseline | §13 `train_tiger_mb_mbgen_baseline.sbatch` |
+| **PBA model** | `train_tiger_mb_pba_mdrqvae.sbatch` | §14 `train_tiger_mb_pba.sbatch` |
+
+Reading a row isolates the tokenizer; reading a column isolates the architecture.
+
+**Run:** `sbatch sbatchfiles/train_tiger_mb_pba_mdrqvae.sbatch` runs immediately (MD-RQ-VAE SID
+already exists); `train_tiger_mb_pba.sbatch` needs the regenerated 3-level MBGen SID first.
+
+**Results (test, userdrop, top_k_for_generation=10):**
+| metric | PBA + MBGen SID (3-lvl, dedup) | PBA + MD-RQ-VAE SID (2048_1024) |
+|---|---|---|
+| t3_recall_10 (joint) | 0.1976 | 0.1971 |
+| t3_recall_5 | 0.1885 | 0.1900 |
+| t3_ndcg_10 | 0.1558 | 0.1566 |
+| t2_recall_10 (beh-conditioned) | 0.1569 | 0.1574 |
+| t1_recall_10 | 0.9714 | 0.9689 |
+| t1_recall_5 | 0.9050 | 0.9176 |
+| t3_behavior_accuracy | 0.826 | 0.752 |
+| t3_behavior_f1_buy | 0.308 | 0.312 |
+| t3_behavior_f1_pv | 0.904 | 0.857 |
+| test/loss | 12.25 | 12.76 |
+
+**Verdict — PBA does not help; tokenizer swap does not help.** All retrieval metrics are tied to
+the 3rd decimal and sit at the same **~0.197 joint ceiling** as every tiger run. `t2`
+(conditioned on GT behavior, isolates SID retrieval) is identical (0.1569 vs 0.1574) → the core
+retrieval capability is unchanged by architecture or tokenizer. The only real difference is the
+behavior head's operating point: the MBGen run is more pv-skewed (higher pv recall/accuracy,
+lower cart/fav recall) but **buy_f1 is identical (0.308 vs 0.312)** — a precision/recall bias
+shift that nets to zero on the pv-dominated joint, not a capability gain. The collision caveat
+does NOT manifest: MD (36% collision) is not higher on t3 than MBGen (0% collision, dedup token).
+Conclusion: PBA's FFN-level changes (position experts + behavior injection) don't touch the
+bottleneck, which is pv-dominance (~93% of test) + pv next-item unpredictability. Both the model
+axis (two-view rerank §12e, PBA §14) and the tokenizer axis (§13) converge on ~0.197 → the ceiling
+is a problem-definition/data issue (aggregate joint measures mostly pv), not architecture/tokenizer.
+## 15. MD-RQ-VAE — the core tokenizer (★ primary research contribution)
+
+The **Multi-modal Dual Residual Quantized VAE** (`src/modules/clustering/md_rqvae.py`,
+`class MDRQVAE`) is the heart of this project: it turns each item's paired SigLIP text + image
+embeddings into a 3-token semantic ID whose levels are **modality-decomposed and additive**.
+Every downstream idea (BM-TV encoder §6, Two-View align/rerank §12e, the near-miss probe §12c)
+depends on the additive property this tokenizer is designed to produce. Trained via
+`configs/experiment/md_rqvae_train_flat.yaml`; SIDs extracted via `md_rqvae_inference_flat.yaml`.
+
+### 15.1 Inputs & preprocessing
+- Raw features: SigLIP2-so400m-patch14-384 **text** `x_t` (1152-d) and **image** `x_i` (1152-d),
+  one pair per item (only items with BOTH modalities are tokenized).
+- Per modality: **L2-normalise then LayerNorm** (`text_input_norm`, `image_input_norm`) — removes
+  magnitude variation, then rescales to a learned distribution on the unit sphere.
+
+### 15.2 Architecture / forward path (latent_dim d = 512)
+```
+z_t = E_t(x_t),   z_i = E_i(x_i)                 # encoders: MLP 1152 -> 768 -> 256 -> 512
+z_f = F(z_t, z_i)                                # CrossAttentionFusion -> shared "commonality" z_f
+# ---- Level 1: SHARED (commonality) ----
+id_shared, e_f1 ~ C_f(z_f)                       # shared codebook  C_f (2048 entries)
+r_f = z_f - e_f1.detach()                        # residual w.r.t. the HARD codebook vector
+# ---- Level 2: TEXT-specific ----
+v_t = text_fusion_mlp( concat[r_f, z_t] )        # 1024 -> 512 ; residual + text latent
+id_text,  e_t2 ~ C_t(v_t)                        # text codebook   C_t (1024 entries)
+# ---- Level 3: IMAGE-specific ----
+v_i = image_fusion_mlp( concat[r_f, z_i] )       # 1024 -> 512 ; residual + image latent
+id_img,   e_i3 ~ C_i(v_i)                        # image codebook  C_i (1024 entries)
+# ---- Reconstruction (this is what forces the additive property) ----
+x_t_hat = D_t( e_f1 + e_t2 )                     # decoders: MLP 512 -> 256 -> 768 -> 1152
+x_i_hat = D_i( e_f1 + e_i3 )
+```
+- **CrossAttentionFusion** `F`: bidirectional cross-attention — text queries image context and
+  image queries text context (`t2i_attn`, `i2t_attn`, 4 heads), each residual-added + LayerNormed,
+  concatenated and projected `2d -> d`. Produces the commonality embedding `z_f`.
+- **Codebooks** `C_f / C_t / C_i`: `EMAVectorQuantization` (EMA decay 0.99, dead-code threshold
+  1.0, squared-Euclidean distance, **STE** straight-through, **KMeans++** init, init_buffer 3072).
+  Sizes **[2048, 1024, 1024]** for the `2048_1024` run.
+- `e_f1` is **detached** when forming `r_f`, so the residual is taken against the hard code; `z_f`
+  still receives gradient from the downstream text/image commitment terms (extra regularisation).
+
+### 15.3 The additive property (why this design)
+Because the decoders reconstruct each modality from a **sum**:
+`x_t_hat = D_t(e_f1 + e_t2)` and `x_i_hat = D_i(e_f1 + e_i3)`, training drives
+**`e_f + e_t ≈ text latent`** and **`e_f + e_i ≈ image latent`**. The shared code carries the
+cross-modal commonality; each modality residual adds only what is modality-specific. This is the
+exact structure exploited by BM-TV (V_shared=e_f, V_text=e_t, V_img=e_i), by the Two-View
+align/rerank (`v_t=e_f+e_t`, `v_i=e_f+e_i`), and by the near-miss probe. It is the property MBGen's
+tokenizer (single fused embedding, non-decomposed levels) does NOT have.
+
+### 15.4 Loss
+`L_total = L_rec + alpha * L_aux + beta * L_vq`  (alpha = beta = 1)
+- `L_rec = MSE(x_t, x_t_hat) + MSE(x_i, x_i_hat)` — reconstruct both modalities from the summed codes.
+- `L_aux = InfoNCE(z_f, z_t) + InfoNCE(z_f, z_i)` — in-batch, **learnable temperature**; pulls the
+  shared `z_f` toward BOTH modality latents so it genuinely captures commonality (not one modality).
+- `L_vq` = sum of VQ + commitment losses over `{C_f, C_t, C_i}` (commitment weight in each codebook's
+  `loss_function.beta`). Codebooks are updated by EMA, not gradient.
+
+### 15.5 Output SID
+3 tokens per item `[id_shared, id_text, id_img]`, each 0-indexed into its codebook; widths
+`[2048, 1024, 1024]`. `predict_step` writes `item_id -> (3 ids)`, merged/deduped/transposed to the
+`[3, N]` `semantic_ids.pt` (column == item_id; see §13 and `verify_md_sid_2048_1024.out`).
+Quality of the `2048_1024` run: all three codebooks ~100% active, per-level entropy 95-99% of max,
+levels near-independent, **collision 36.2%** (4.16M unique / 5.41M items) — acceptable (TIGER-class).
