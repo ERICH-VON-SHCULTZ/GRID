@@ -506,6 +506,96 @@ discriminative structure. Scripts: `train_tiger_mb_twoview_contrastive_{baseline
 its OWN contrastive baseline. If contrastive rerank still ≤ baseline → the decoder ranking is the
 ceiling for pool reranking; escalate to dense catalog retrieval or accept pv unpredictability.
 
+### 12f. SID<->behavior coupling probe (two go/no-go gates)
+
+`rec-tmall/analyze_sid_behavior_coupling.py` (sbatch `analyze_sid_coupling_{mi,asym}.sbatch`).
+Fit on userdrop **training**, evaluate on **eval** under the natural ~93.6% pv prior (prior-shift
+correction active: train pv 80.0% -> eval 93.75%). Coverage-skip **0.000%** both parts (item sets
+match: 5,409,793 valid items). H(B) on eval = 0.4293 bits (behavior is very low-entropy).
+
+**Part A — is behavior predictable from the SID beyond previous behavior?  -> GREEN.**
+- MI (eval, bits / MI÷H(B)): `ID_shared` 0.0176/0.041, `ID_text` 0.0090/0.021, `ID_img` 0.0096/0.022,
+  **`b_prev` 0.0150/0.035** (reference). The shared SID carries *more* marginal behavior signal than
+  previous behavior — small absolutely, but real.
+- Buy lift (shared codes, >=200 train occ): **718 codes at >2x** buy-lift cover 7.6% of eval traffic
+  (mean buy rate 10.4% vs 3.36% base); only 1 code >5x.
+- Held-out buy detection (max-F1, prior-corrected): (i) `P(b|b_prev)` **0.197**, (ii)
+  `P(b|shared,b_prev)` **0.253**, (iii) `P(b|ID_shared)` alone 0.095 (weak standalone -> the signal is
+  *complementary* to b_prev, not standalone).
+- **Gate: Δbuy_F1 (ii)-(i) = +0.056 ≥ 0.05 -> GREEN** for Step 2 (SID-conditioned behavior head).
+  Nuance: (ii)=0.253 is still *below* the model's focal buy_F1 ceiling (~0.34), so a lookup table
+  does NOT beat the learned head. But behavior is generated *before* the SID in the current order,
+  so the head never sees the target SID; the +0.056 says a **reorder (2a: SID-then-behavior)** has
+  genuine signal to exploit that the current architecture cannot.
+
+**Part A.4 — modality-additivity of behavior MI (held-out predictive MI).** Plug-in MI on the
+2048x1024x1024 joint would overfit (~every triple unique), so fit `P(B|code)` on train (Dirichlet
+a=1, >=50 support, prior-corrected, backoff->shared) and score cross-entropy on eval; pred-MI =
+H(B)-CE. Positive & honest (held-out can't inflate):
+
+| code set | pred-MI (bits) | Δ vs shared |
+|---|---|---|
+| shared | 0.0146 | - |
+| shared + text | 0.0165 | +0.0020 |
+| shared + img | 0.0167 | +0.0021 |
+| shared + text + img | 0.0176 | **+0.0030** |
+
+**Count-level proof that the text/image residuals carry behavior info the shared code lacks: +0.0030
+bits = +21% over shared.** Text and image each add ~equally and are partly redundant (sub-additive:
+0.0020+0.0021 > 0.0030). Absolute is small (0.003 of H(B)=0.43 bits ≈ 0.7%) but real — the paper
+sentence for "modality decomposition adds behavior signal," established before any model is trained.
+
+**Part A.5 — repeat-evidence value (attribution: repeat feature vs SID).** Per transition, the
+target item's prior-interaction 4-bit mask (which behaviors it had earlier in the sequence). P(buy |
+category) on eval:
+
+| prior interaction of next item | n(eval) | P(buy) | lift |
+|---|---|---|---|
+| not in history | 4.07M | 0.01% | 0.0 |
+| pv only | 1.07M | 1.36% | 1.3 |
+| has fav (no cart) | 129k | 1.66% | 1.6 |
+| **has cart** | 263k | **15.91%** | **15.1** |
+| has buy | 62k | 3.09% | 2.9 |
+
+The **cart->buy funnel dominates**: a previously-carted item is bought 15.9% of the time (15x base);
+a never-seen item is essentially never bought (0.01%). Buy-detection max-F1 attribution ladder
+(train-fit tables, prior-corrected): (i) `b_prev` 0.197 -> (ii) `+ID_shared` 0.253 (+0.056) -> (b1)
+`+repeat-set` 0.376 (**+0.179**) -> (b2) `+repeat-set+ID_shared` **0.416** (+0.040 on top of b1).
+**The repeat feature is ~3x the SID's value (+0.179 vs +0.056)**, and SID's marginal add shrinks to
++0.040 once repeat is present (partly redundant). The full count table (0.416) **exceeds the learned
+model's focal buy_F1 ceiling (~0.34)** — the model is leaving the repeat signal on the table. (Caveat:
+F1 threshold is picked on eval -> mild optimism on absolutes; the deltas/ranking are the honest read.)
+
+**Part B — per-behavior modality asymmetry (text-view vs image-view ranking)?  -> RED.**
+Transitions: 851,753 (pv capped 500k; fav 126k, cart 166k, buy 60k). **Repeat share is extreme for
+buy: 92%** (54,980/59,614) — Tmall's re-click-then-buy loop — vs cart 42%, fav 28%, pv 17%.
+R@10 vs an 8192-negative pool, Δ = text - img:
+
+| behavior | R@10 text | R@10 img | Δ(t-i) | 95% CI | shared-only |
+|---|---|---|---|---|---|
+| pv (non-repeat, last) | 0.223 | 0.219 | +0.004 | [+0.003,+0.004] | 0.172 |
+| fav | 0.909 | 0.909 | -0.000 | [-0.000,+0.000] | 0.719 |
+| cart | 0.941 | 0.941 | -0.000 | [-0.000,+0.000] | 0.763 |
+| buy | 0.911 | 0.911 | -0.001 | [-0.002,+0.001] | 0.741 |
+
+Text beats image by a hair, but **uniformly across all behaviors** (no buy-specific text advantage).
+Mean-of-5 history shows larger text advantages (cart +0.019, fav +0.015) but again the *same ordering
+for every behavior*. Interaction **Δ_buy - Δ_pv = -0.43 pts, 95% CI [-0.58, -0.28]** — excludes 0 but
+is negative and |gap| < 2 pts.
+- **Gate: RED** — behavior-gated BM-TV is not licensed; buy does not prefer the text view more than pv
+  does. This **retroactively explains the flat ungated BM-TV result with data**, not speculation.
+- Bonus (e_f-dominance test): shared-only R@10 is well *below* the full-view average (buy 0.741 vs
+  0.911; pv 0.172 vs 0.221) -> **residuals add real ranking signal**; e_f does NOT dominate the
+  ranking geometry (so §12e's rerank failure is not purely e_f dominance).
+
+**Net (updated with A.4/A.5):** the biggest behavior win is an **explicit repeat / prior-behavior-set
+feature** (+0.179 buy_F1; the cart->buy funnel), not the SID — prioritize adding it (a count table with
+it already beats the model's 0.34). The SID-conditioned behavior head (Step 2 reorder) is a real but
+**secondary** gain (~+0.040 on top of repeat; A.4 confirms modality residuals do carry +21% behavior
+info). Shelve BM-TV / behavior-gating (Part B RED). Honest ordering: repeat feature >> SID-head reorder
+>> modality decomposition; do not over-credit the tokenizer/architecture for a win the repeat feature
+supplies.
+
 ## 13. MBGen tokenizer baseline (alternative SID, not GRID's MD-RQ-VAE)
 
 Goal: a clean **tokenizer ablation** — feed the *same* multi-behavior TIGER the semantic IDs
@@ -696,3 +786,289 @@ tokenizer (single fused embedding, non-decomposed levels) does NOT have.
 `[3, N]` `semantic_ids.pt` (column == item_id; see §13 and `verify_md_sid_2048_1024.out`).
 Quality of the `2048_1024` run: all three codebooks ~100% active, per-level entropy 95-99% of max,
 levels near-independent, **collision 36.2%** (4.16M unique / 5.41M items) — acceptable (TIGER-class).
+
+## 16. MFD — Modality-Factorized Decoding (decoder ablation on the MD-RQ-VAE SID)
+
+Goal: spend the §12g "levels near-independent" license structurally. The chain decoder generates
+`P(b,s|x)=P(b|x)·P(f|x,b)·P(t|x,b,f)·P(i|x,b,f,t)`; MFD **drops the last edge** (`t->i`), the
+one §12g's CMI(t;i|f) says carries ~1.7% of the info:
+`P(b,s|x)=P(b|x)·P(f|x,b)·P(t|x,b,f)·P(i|x,b,f)`. Text and image are predicted by **two parallel
+heads reading the SAME `h_f`** (never fed as inputs), so the teacher-forced decoder is 3 positions
+`[BOS, behavior, f]` instead of 4. Everything else — MD-RQ-VAE SID, T5 backbone (d_model=128, 6
+heads, d_ff=1024, 4 layers, mlp_layers=2), data pipeline (`next_k` stays 4; MFD slices the first
+two label columns internally), evaluator, focal/behavior-weighting — is inherited **unchanged**, so
+this is a clean isolation of the decoder factorization vs the chain baseline in §14.
+
+**Files:** model `src/models/modules/semantic_id/mfd_generation_model.py`
+(`class MFDMultiBehaviorEncoderDecoder(SemanticIDMultiBehaviorEncoderDecoder)` — overrides only
+`model_step`, `generate_multibehavior`, `generate_conditioned`); config
+`configs/experiment/tiger_mb_mfd_flat.yaml` (byte-for-byte copy of `tiger_mb_train_flat.yaml`
+except the model target + MFD knobs); sbatch `sbatchfiles/train_tiger_mb_mfd.sbatch`.
+
+**Loss** = CE_beh (focal-ready) + CE_f + CE_t|f + CE_i|f; the two modality CEs backprop into the
+same `h_f` (shared-state contention — this is deliberate). **Generation** = compositional beam with
+agreement scoring (§5 of the spec): beam over `(behavior,f)` → K_f roots; one forward to `h_f`,
+read BOTH heads → top-K_t text × top-K_i image; **catalog-filter** each `(f,t,i)` against the 4.16M
+valid tuples in `self.codebooks` (replaces the chain's validity-by-construction); score
+`logP(f) + (1/τ)[logP(t|f)+logP(i|f)]`; global top-K_pool. Defaults K_f=K_t=K_i=10 (→ **1000**
+explored per item), **K_pool=50**, τ=1.0 (exact product-of-experts). τ is frozen/inference-swept by
+design so the training path == the chain baseline's; ablation knobs `mfd_tau`, `mfd_score_text/image`
+(agreement vs single-branch), `mfd_top_k_text/image` (asymmetry), `mfd_catalog_constraint`.
+
+**Results (test, userdrop, MD-RQ-VAE 2048_1024 SID). Chain = §14 PBA+MD-RQ-VAE.**
+| metric | chain (§14, pool=10) | **MFD (τ=1, pool=50)** | Δ |
+|---|---|---|---|
+| t3_recall_10 (free-gen joint) | 0.1971 | **0.1899** | **−0.0072** |
+| t3_recall_5 | 0.1900 | 0.1812 | −0.0088 |
+| t3_ndcg_10 | 0.1566 | 0.1473 | −0.0093 |
+| **t2_recall_10** (beh-conditioned SID) | 0.1574 | **0.1996** | **+0.0422** |
+| t2_recall_5 | — | 0.1943 | (big) |
+| t1_recall_10 (buy SID) | 0.9689 | 0.9403 | −0.0286 |
+| t1_recall_5 | 0.9176 | 0.8932 | −0.0244 |
+| t3_behavior_accuracy | 0.752 | **0.552** | **−0.200** |
+| t3_behavior_f1_buy | 0.312 | 0.296 | −0.016 |
+| t3_behavior_f1_pv | 0.857 | 0.704 | −0.153 |
+| test/loss | 12.76 | 13.46 | +0.70 |
+
+**The headline is NOT the −1% on t3 — it is the split:**
+- **t2 (pure SID retrieval, behavior given) JUMPS +27% relative** (0.157→0.200). Given the behavior,
+  the factorized compositional beam retrieves the next-item SID far better than the chain's beam.
+  This is the promising signal and the reason to keep exploring MFD.
+- **t3 (free-gen joint) drops −3.7% rel**, driven almost entirely by **behavior accuracy collapsing
+  0.752→0.552** (pv_f1 0.857→0.704). The SID pool got better but the *behavior chosen for the top
+  beam* got worse, and the joint metric multiplies the two.
+- **t1 (exact buy tuple) drops −3%** — consistent with §12g: dropping the `t->i` edge loses a little
+  of the fine joint structure that the chain nails on repeat-heavy buy items.
+
+**Diagnosis of the t3/behavior drop.** In free generation the top beam's behavior is `argmax` of the
+composed joint score over a **5× larger, SID-diverse pool** (1000 explored / 50 kept vs the chain's
+10). A rare-behavior item with a very sharp `(f,t,i)` can outscore the marginally-more-likely pv
+item, so maximizing joint prob over a bigger pool naturally depresses behavior accuracy. **This is
+plausibly a pool-size artifact, not intrinsic to factorization** — it is confounded because the
+chain baseline ran at pool=10. ⚠ **The comparison is not yet apples-to-apples: the chain baseline
+must be re-run at `top_k_for_generation=50` before attributing the t2 gain or the t3/behavior loss
+to factorization.** The empirical t3 hit (~1%) is, however, consistent in magnitude with §12g's
+predicted ~1.7% information loss from the removed edge.
+
+**Verdict — keep exploring.** MFD is not a flat loss: it materially improves conditioned SID
+retrieval (t2) and only loses on the behavior-selection step of free generation, which is the most
+fixable part. Improvement directions (evidence-ranked) recorded in `sbatchfiles/train_tiger_mb_mfd.sbatch`
+header and the chat log: (0) pool-matched chain baseline; (1) decouple behavior selection from SID
+sharpness / behavior-score weight to recover t3; (2) joint-rerank tail to recover the §12g 1.7% on
+t1/t3 while keeping the t2-winning pool; (3) τ sweep {0.7,1.5,2.0} (built-in); (4) train-time
+agreement objective (remove the train/inference mismatch); (5) shared-`h_f` contention relief.
+
+### 16.1 Behavior-marginalized pooling + the §0 diagnostic audit
+
+**Behavior-marginalized pooling** (`mfd_behavior_marginalized=true`, default): free-gen no longer
+commits one behavior in the beam — it runs the f-branch under ALL 4 behaviors, builds a per-behavior
+pool (each behavior its own top-K_f f-roots), and ranks the union by `w_b·logP(b)+SID_score(.|b)`.
+So the per-behavior retrieval that wins t2 runs inside t3. `w_b` (`mfd_behavior_weight`) trades
+behavior-likelihood vs SID sharpness. **Result: at `w_b=1` it lifted t3_recall_10 0.1899→0.1938;
+raising `w_b` HURTS the marginalized/union t3** (0.1884 at 2, 0.1682 at 4) because up-weighting
+`logP(b)` lets the dominant pv branch crowd the ~7% non-pv events out of the top-10 (the entire drop
+is the non-pv rows; pv stays flat). **So `w_b=1` is best for aggregate t3 here — this supersedes the
+earlier "increase w_b" guidance, which was framed on the committed-beam behavior accuracy, not the
+union t3.**
+
+**§0 audit** — one instrumented test pass (`mfd_audit_dump=true`, wb=1 ckpt, 83k stratified events)
+→ `mfd_audit_dump.pt` → three offline analyses (`analyze_mfd_audit.py`; sbatch `mfd_audit.sbatch`).
+
+- **0a — pool routing (t1 collapse is a SCORING ARTIFACT).** Re-ranking the SAME dump three ways:
+  `t1_recall@10` — union 0.973, **routed (GT-beh branch) 0.975**, committed 0.940; `@5` — routed
+  **0.968** vs committed 0.893. `t2@10` routed 0.1987 ≈ committed 0.1996. `t3@10` union 0.1939.
+  → The marginalized run's earlier "t1 drop to 0.909" was an artifact of scoring behavior-conditioned
+  tracks against the 4-way union pool. **Standing readout: report t1/t2 from the ROUTED (GT-behavior)
+  pool, t3 from the union.** Costs nothing, recovers ~8 pts of phantom t1.
+- **0c — coverage vs ordering (COVERAGE is the binding constraint).** oracle coverage@pool = **0.2085**
+  (this IS the t3 ceiling any reranker can reach; current t3@10 0.1939 → only +0.015 ordering headroom).
+  Loss decomposition: **f_pruned=0.596** (60% of GT have the shared code f* outside the top-10 f-roots)
+  ≫ branch_t 0.151 ≫ branch_i 0.030. By behavior: pv coverage only **0.158** (f_pruned 0.634) vs
+  fav/cart/buy **0.96–0.98** — the model nails f for rare behaviors, misses it for pv. In-pool ordering
+  is good (P(rank<10)=0.93). **Lever = widen K_f** (attacks f_pruned) — and this is the rare non-crowding
+  scaling case: more f-roots add genuinely-new shared-code coverage, unlike widening the behavior union.
+  - **catalog_killed=1.38% was a mislabel.** The original metric conflated a real catalog bug with pool
+    truncation (GT valid+composed but ranked >Kpool=50). The catalog is built from the same
+    `semantic_ids.pt` the labels use, so GT is valid by construction. Added a DIRECT `gt_in_catalog`
+    flag + a printed unit test in the dump (`GT tuples NOT in catalog = N/total`), and the analysis now
+    splits `cat_invalid` (real bug) vs `trunc` (ordering; does NOT affect recall@10). Re-dump to read
+    the unit test; expect 0 invalid → the 1.38% is truncation, not a catalog rebuild.
+- **0b — contention (PMQ weakly licensed).** Teacher-forced acc at GT f: MFD `acc(t|GT f)` top1
+  **0.238** vs chain **0.244** (gap +0.6pt top1, +0.9pt top5); `acc(i|·)` MFD 0.254 vs chain 0.304
+  (gap +5.1pt). Text has NO dropped edge (both predict t|f), so the text gap is **pure contention** from
+  the two heads sharing one `h_f` → PMQ (per-modality query / relieve shared `h_f`) is licensed. The
+  larger image gap = contention + the legitimate §12g dropped-edge (~1.7%). CAVEAT: the chain reference
+  (`2026-06-30/19-35-17`) used codebook_init+focal vs MFD's random/no-focal, biasing toward
+  over-detecting contention, and +0.6–0.9pt sits near the 0.5pt threshold → treat as **weakly** confirmed;
+  a regime-matched chain would firm it up.
+
+**Next (evidence-ordered): (1)** re-dump to run the catalog unit test (blocking sanity, expected pass);
+**(2)** widen K_f — coverage sweep is offline in `analyze_mfd_audit.py` (from the full f* ranks), real
+t3@10 vs K_f∈{10,20,50,100,200} via `sbatchfiles/mfd_kf_sweep.sbatch`; find the knee where pv coverage
+converts to t3. K-widening here is endorsed by the audit (the biggest single t3 lever), unlike the
+behavior-union widening that caused the earlier t1 artifact.
+
+### 16.2 K_f sweep result — right direction, LOW ROOF
+
+Real eval (`mfd_kf_sweep.sbatch`, wb=1, marginalized, K_t=K_i=10, frozen wb1 ckpt):
+
+| K_f | t3_recall_10 | t3_recall_5 | t2_recall_10 | t1_recall_10 (union) | Δt3@10 vs prev |
+|---|---|---|---|---|---|
+| 10  | 0.1938 | 0.1827 | 0.1987 | 0.9089 | — |
+| 20  | 0.1969 | 0.1843 | 0.2026 | 0.9083 | +0.0031 |
+| 50  | 0.1993 | 0.1849 | 0.2059 | 0.9090 | +0.0024 |
+| 100 | 0.2005 | 0.1850 | 0.2076 | 0.9082 | +0.0012 |
+| 200 | 0.2010 | 0.1850 | 0.2085 | 0.9087 | +0.0005 |
+
+**Findings.** (a) Widening K_f works exactly as 0c predicted — monotonic t3 gain, **knee at K_f≈50**
+(captures 0.0055 of the total 0.0072), fully saturated by K_f=100-200. (b) At K_f≥50 MFD marginalized
+now **edges past the chain baseline** (chain t3@10=0.1971; MFD K_f=50 **0.1993**, K_f=200 **0.2010**) —
+the first clean t3 win for MFD, but only **+0.002–0.004**. (c) t2@10 climbs in lockstep (0.199→0.2085)
+and t3@10 saturates just under it — i.e. t3 has converged onto the **coverage ceiling (oracle
+0.2085)**; once f-coverage is spent, the residual loss is branch pruning (branch_t 0.151, the next
+constraint) + behavior crowding, not ordering. (d) t3_recall_**5** barely moves (0.1827→0.1850): the
+extra K_f candidates land at ranks 5–10, not the very top. (e) t1 (union) and behavior_accuracy are
+K_f-invariant (0.909 / 0.534) as expected — K_f is purely a shared-code coverage knob.
+
+**The low roof is structural, not a K_f problem.** MFD converges to **t3@10 ≈ 0.201**, essentially the
+0.2085 coverage oracle, which sits at the same **~0.20 joint ceiling** every tiger/PBA run hits (§14) —
+pv dominance (93%) + pv next-item unpredictability. K_f converted MFD's coverage debt into a small,
+free, inference-only win over the chain, but did not break the ceiling. **Cost/benefit: use K_f=50**
+(the knee — 5× the modality forwards for ~0.0055 of the 0.0072; K_f=200 is 20× for the last 0.0005).
+Beyond K_f, the only remaining levers are the ones that lift the ceiling itself: the joint-rerank tail
+/ PMQ (0b, ~0.015 ordering + contention headroom) and, structurally, the repeat-evidence behavior
+feature (§12f A.5) — not more beam width.
+
+### 16.3 PMQ / Query-f — learnable query slots (implemented; grid A/B/C)
+
+Attacks the two measured MFD problems (0b head contention: acc(t|GT f) trails chain by 0.9pt with
+t,i sharing h_f; 0c f-pruning: pv f_pruned 0.634, K_f only masks it, roof 0.201). Gives each
+prediction its OWN decoder slot / hidden state / attention pass, keeping the factorization
+P(f|hist,b)·P(t|hist,b,f)·P(i|hist,b,f) exact. Config flags (`MFDMultiBehaviorEncoderDecoder`):
+`use_pmq`, `use_query_f`, `decoder_slot_type_emb` (zero-init identity signal, T5 has no absolute PE),
+`mfd_warmstart_path` (load a prior ckpt strict=False; new query params start at init).
+
+| run | use_pmq | use_query_f | block | launcher |
+|---|---|---|---|---|
+| A (ref) | false | false | [BOS, beh, f] | `train_tiger_mb_mfd.sbatch` (existing) |
+| B | true | false | [BOS, beh, f, q_t/q_i] | `train_mfd_pmq.sbatch` |
+| C | true | true | [BOS, beh, q_f, f, q_t/q_i] | `train_mfd_pmq_qf.sbatch` |
+
+**Two implementation decisions that deviate from the original spec (both deliberate):**
+1. **In-model, NOT collate/label.** GRID's MFD decoder is single-target-item (history lives in the
+   untouched stride-4 encoder), so the query slots + mask are a within-block, model-internal concern.
+   Building them in the model (not collate_functions / label_function / next_k) keeps the data pipeline
+   byte-identical → **run A reproduces the old metrics exactly** and there's no encoder/label-alignment risk.
+2. **Two separate passes for q_t and q_i, NOT one block with a custom q_i-/->q_t 4D mask.** Running
+   each modality query as the last slot of its own pass makes them conditionally independent given f
+   BY CONSTRUCTION and uses only STANDARD causal masking (attention_mask=None → T5's own causal, the
+   path the current MFD already relies on) — avoids depending on unverified T5 3D/4D-mask semantics.
+   Cost: one extra tiny modality forward under PMQ. q_f sits before f so causal masking alone stops it
+   seeing f* (no mask edit needed).
+
+Each launcher runs warm-start train+test (t1/t2/t3 + behavior) THEN an audit on the trained ckpt
+(f_pruned / coverage@pool / teacher-forced acc(t|GT f) vs chain_tf_audit.pt). Decision metrics — B:
+acc(t|GT f) top1/5 toward chain 0.2437/0.3412 (from 0.2377/0.3322); C: pv f_pruned down / coverage up
+/ t3@10 above the 0.201 roof.
+
+**Run-C shipped and is the FROZEN base for the reranker (§17).** Checkpoint
+`/scratch/yw8866/logs/train/mfd_pmq_qf/checkpoints/checkpoint_epoch=000_step=033750.ckpt`
+(launcher `train_mfd_pmq_qf.sbatch`). CMIR (cross-modal iterative refinement) was also built
+(`use_cmir`, `train_mfd_cmir.sbatch`) and gives t2@10=0.2096 / t3@10=0.2024 — a hair below Run-C, so
+the direction moved to a **second-stage reranker** rather than more decoder surgery.
+
+---
+
+## 17. ★ Two-stage listwise reranker — the FINAL result (t3@10 0.2041 → 0.2150, t2@10 → 0.2225)
+
+The single biggest win after the tokenizer. A shallow **listwise cross-encoder** rescores the frozen
+Run-C candidate pool; the generative model is **never retrained**. Files:
+`src/.../mfd_generation_model.py` (Stage-1 dump), `rec-tmall/train_mfd_reranker.py` (Stages 2–3),
+`rec-tmall/analyze_mfd_audit.py` (offline coverage math, reused verbatim for comparable metrics).
+
+### 17.1 Why a second stage — the ceiling diagnosis (the §0 audit, §16.1)
+The joint-t3 ceiling near 0.20 is **structural, not a beam-width bug**: recall@10 is K_pool-invariant,
+and the §0 audit decomposes every miss into COVERAGE (GT absent from the pool) vs ORDERING (GT present
+but ranked ≥10). At the operating point the GT is in the pool only **26.2%** of the time
+(`coverage@pool`), yet **P(rank<10 | covered)=0.781** — i.e. an ordering headroom of ~+0.057 that no
+K-widening touches (widening lands the extra GTs at rank ≥10). The hand-weighted log-prob sum
+`w_b·logP(b)+logP(f)+(1/τ)[logP(t|f)+logP(i|f)]` simply cannot surface them → **learn the ordering.**
+
+### 17.2 Architecture (three deliberate choices; earlier MSE/random-neg/pooled-query rerankers degraded recall — not reused)
+- **Stage 1 — candidate dump** (`mfd_dump_memory=true`, an `mfd_audit_dump` pass on frozen Run-C).
+  Per event stores: the per-behavior candidate pools `(f,t,i)`, their four component log-probs
+  `(logP(b), logP(f), logP(t|f), logP(i|f))`, the **frozen encoder memory** (+mask), the raw history
+  token sequence `hist_ids`, GT SID + `gt_in_catalog`. Self-contained → Stage 2 needs no T5.
+- **Stage 2 — reranker** (`MFDReranker`, ~0.47M params, 2 layers, d_model=128). Each candidate token =
+  three **MD-RQ-VAE view vectors** `[u_f, u_f+u_t, u_f+u_i]` (codebook centroids lifted through the
+  orthogonal `W_up`; NO new item table) + the 4 log-probs as scalars, then it **cross-attends into the
+  FULL encoder-memory sequence** (not a pooled summary) → one scalar per candidate. Zero-init head +
+  `base_scale=1` ⇒ at step 0 the score == baseline `union_score` exactly (identity start).
+  **Listwise cross-entropy** over the whole pool, GT positive, trained only on GT-in-pool events with
+  the generator's own real-pool hard negatives.
+- **Stage 3 — two-stage eval.** Offline rescoring of the dumped pool over the dumped memory is
+  bit-identical to live "frozen generator → reranker → top-10". Metrics reuse
+  `analyze_mfd_audit.best_rank/recall_at/union_score` verbatim (only the score changes) so numbers stay
+  comparable: t3/t2 recall@{5,10,20}, NDCG@{5,10}, P(rank<10|cov), per-behavior t3@10 & t2@10.
+- **Split hygiene:** TRAIN on the training split (~250k events → ~98k GT-in-pool, the axis-2 data
+  scaling), SELECT on the evaluation split, REPORT on the testing split — **no test peeking**.
+
+### 17.3 Engagement features — the win (`--use_hard` / `--use_soft`)
+The reranker's strongest signal is **repeat interaction** (measured on this data: P(buy)=0.01% if the
+item never appeared in history, 1.36% after a page-view, **15.91%** after add-to-cart; ~92% of buys are
+repeats). Two per-candidate families (the ONLY change vs the views-only baseline is `scalar_proj`'s
+input width — architecture otherwise identical):
+- **HARD** — per behavior {pv,fav,cart,buy}: `[indicator, log1p(count), recency]` of history items with
+  the candidate's EXACT `(f,t,i)` tuple (recency∈(0,1], most-recent history item=1.0).
+- **SOFT** — per behavior × per view {u_f, u_f+u_t, u_f+u_i}: max cosine of the candidate's view vs
+  that behavior's history items. Catches variant re-engagement (same product, different SKU/colorway)
+  and is robust to the 36% SID collision; only constructible because the tokenizer gives additive
+  shared/text/image views.
+
+**Ablation (TEST t3@10, baseline union_score = 0.2041):** views 0.2084 · **+hard 0.2144** · +soft 0.2083
+· **+both 0.2150**. Hard match drives the repeat-heavy behaviors; soft adds a little on top.
++both per-behavior t3@10: pv 0.1562→**0.1661**, fav →0.9471, cart →0.9607, buy →0.9429;
+P(r<10|cov) 0.781→**0.822**. Model selected on VAL @ ep1.
+
+### 17.4 Wide pools (G5) + K_pool — informational (negative) result
+To raise the 0.262 coverage ceiling: re-dump at **K_t=K_i=1024** (= full head width → no t/i pruning).
+The infeasible dense `K_f·K_t·K_i` grid (209M/behavior, 53GB tensor) is replaced by the
+`mfd_wide_catalog_pool` path — score the **unique catalog tuples directly** in one vectorized pass
+(`code2root` scatter + gather of each root's per-modality log-probs), ~same cost as the current dump.
+Coverage@**grid** rises to ~0.756, but at **K_pool=500** coverage@**pool** stayed FLAT at 0.2618
+(≈ G4's 0.2615) and t3@10 = 0.2146 — the top-500 by generator score is the same set regardless of
+branch width; the newly branch-covered GTs (low generator score) are truncated before the reranker
+sees them. **K_pool, not branch width, is the binding constraint at 500.** The escalation is G5 +
+**K_pool=2000** (`mfd_rerank_engagement_g5_kpool2000.sbatch`; C=nb·2000=8000, reranker stores f/t/i
+int16 + lp/base fp16 to fit RAM) — the last lever that admits those GTs into the pool.
+
+### 17.5 Final results (TEST split; ★ = shipped final)
+| run | t2_recall@10 | t2_ndcg@10 | t3_behavior_acc | t3_recall@10 | t3_ndcg@10 |
+|---|---|---|---|---|---|
+| MD-RQ-VAE + MB + Focal Loss | 0.1557 | 0.1557 | 0.508 | 0.1955 | 0.1496 |
+| MBGen arch + MBGen SID | 0.1569 | 0.1569 | 0.8258 | 0.1976 | 0.1558 |
+| MBGen arch + MD-RQ-VAE SID | 0.1574 | 0.1574 | 0.752 | 0.1971 | 0.1566 |
+| MFD (original) | 0.1996 | 0.1803 | 0.5517 | 0.1899 | 0.1473 |
+| MFD + behavior-marginalized pooling | 0.1987 | 0.18 | 0.534 | 0.1938 | 0.1484 |
+| MFD + wider shared-f retrieval (K_f sweep) | 0.2085 | 0.1842 | 0.534 | 0.201 | 0.1509 |
+| + PMQ (q_t,q_i) | 0.2074 | 0.1842 | 0.3848 | 0.2006 | 0.1469 |
+| + PMQ + q_f  (**Run-C**, the reranker base) | 0.2094 | 0.1855 | 0.5291 | 0.203 | 0.153 |
+| + CMIR | 0.2096 | 0.1852 | 0.5441 | 0.2024 | 0.1533 |
+| **★ Final reranker (engagement, +both)** | **0.2225** | **0.1931** | 0.5305 | **0.215** | **0.1556** |
+
+### 17.6 How to run — full pipeline, in order (multimodal embeddings → final reranker)
+| # | stage | script / command | produces |
+|---|---|---|---|
+| 1 | **Multimodal item embeddings** (text + image per item) | upstream feature extraction | per-item text/image vectors |
+| 2 | **MD-RQ-VAE tokenizer** (§15): encode each item into shared/text/image codes | tokenizer training run | `.../2048_1024/checkpoints/checkpoint_000_010000.ckpt` (codebook centroids) + `.../pickle/semantic_ids.pt` (the SID, 5.41M items, widths [2048,1024,1024]) |
+| 3 | **MB TFRecords** (§5) | `build_tfrecords_mb_userdrop.sbatch` (`build_tmall_tfrecords_mb.py`) | `tfrecords_mb_userdrop/{training,evaluation,testing}` |
+| 4 | **Train the generative recommender = Run-C** (MFD + PMQ + Q_f, §16.3) | `train_mfd_pmq_qf.sbatch` | frozen base ckpt `.../mfd_pmq_qf/checkpoints/checkpoint_epoch=000_step=033750.ckpt` |
+| 5 | **Reranker — full ablation** (Stages 1–3; re-dumps train/val/test with memory + `hist_ids`, then views/+hard/+soft/+both) | `mfd_rerank_engagement.sbatch` | dumps `mfd_rerank_eng_{trainsplit,val,test}_dump.pt`; ablation table |
+| 5b | **Reproduce the shipped best (+both) with full metrics** | `mfd_rerank_best.sbatch` | `mfd_reranker_best.pt`; TEST t3@10 ≈ 0.2150 |
+| — | (probes) wide-pool coverage experiments | `mfd_rerank_engagement_g5.sbatch` (K_pool=500), `mfd_rerank_engagement_g5_kpool2000.sbatch` | G5 dumps + reranker |
+
+Steps 1–2 are the tokenizer (the primary research contribution); 3–4 build and train the frozen
+generator; 5/5b are the second-stage reranker. Every reranker sbatch is guarded (skips a dump if its
+`.pt` exists) and enables W&B (`MMMBGRec`). Do **not** disable W&B. The reranker needs the cached
+MD-RQ-VAE centroids (`mfd_rerank_engagement.sbatch` builds `mdrqvae_centroids.pt` once from the 50GB
+tokenizer ckpt; loading it requires the GRID `src` package on `sys.path`, handled in the trainer).

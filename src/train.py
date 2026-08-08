@@ -84,6 +84,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 ckpt_path = getattr(checkpoint_callback, "best_model_path", None)
                 if ckpt_path == "":
                     ckpt_path = None
+            # Test-only runs (train=false) have no fitted best_model_path -> fall back to the
+            # explicitly-provided cfg.ckpt_path so a frozen checkpoint is actually loaded.
+            if not ckpt_path:
+                ckpt_path = cfg.get("ckpt_path")
             if not ckpt_path:
                 command_line_logger.warning(
                     "Best checkpoint not found! Using current weights for testing..."

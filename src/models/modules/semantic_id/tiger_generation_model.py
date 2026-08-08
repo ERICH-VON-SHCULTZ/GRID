@@ -1,3 +1,4 @@
+import collections
 import logging
 from typing import Any, List, Optional, Tuple, Union
 
@@ -1254,11 +1255,29 @@ class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
         align_temperature: float = 0.07,
         use_semantic_rerank: bool = False,
         rerank_weight: float = 0.5,
+        audit_tf_dump: bool = False,
+        audit_tf_path: str = "/scratch/yw8866/rec-tmall/chain_tf_audit.pt",
+        audit_tf_max_events: int = 200000,
+        audit_tf_pv_cap: int = 100000,
+        audit_tf_pv_id: int = 0,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
 
         self.num_behaviors = num_behaviors
+
+        # Chain teacher-forced per-level audit (0b reference; default OFF, chain-only). When on,
+        # the test loop records, per event, the rank of t* in P(t|GT f) and i* in P(i|GT f,GT t)
+        # from the teacher-forced decoder, so 0b can compare MFD's shared-h_f reads against the
+        # chain's dedicated-h_f/h_t reads. Not used by MFD (it has its own richer mfd_audit_dump).
+        self.audit_tf_dump = audit_tf_dump
+        self.audit_tf_path = audit_tf_path
+        self.audit_tf_max_events = audit_tf_max_events
+        self.audit_tf_pv_cap = audit_tf_pv_cap
+        self.audit_tf_pv_id = audit_tf_pv_id
+        self._tf_cols = collections.defaultdict(list) if audit_tf_dump else None
+        self._tf_n = 0
+        self._tf_pv = 0
         self.buy_behavior_id = buy_behavior_id
 
         # ------------------------------------------------------------------
@@ -1968,6 +1987,11 @@ class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
     ):
         model_input: SequentialModelInputData = batch[0]
         label_data: SequentialModuleLabelData = batch[1]
+
+        if self.audit_tf_dump:
+            self._tf_audit_step(model_input, label_data)
+            return
+
         _, loss = self.model_step(model_input=model_input, label_data=label_data)
 
         # free generation for Track 1 and Track 3
@@ -2007,3 +2031,51 @@ class SemanticIDMultiBehaviorEncoderDecoder(SemanticIDEncoderDecoder):
             self._update_sid_probe(generated_ids, marginal_probs, labels)
 
         loss_to_aggregate(loss)
+
+    @torch.no_grad()
+    def _tf_audit_step(self, model_input, label_data):
+        """Chain teacher-forced per-level audit (0b reference). Records rank of t* in P(t|GT f)
+        and i* in P(i|GT f,GT t) from the causal decoder, plus GT behavior, per event."""
+        if self._tf_n >= self.audit_tf_max_events:
+            return
+        fut_ids = list(label_data.labels.values())[0].reshape(model_input.mask.size(0), -1)
+        fut_ids = fut_ids.to(model_input.mask.device)
+        # model_step forward returns model_output[:, :-1] = (B, 1+H, d):
+        #   [:,2] = h after GT f -> predicts t ;  [:,3] = h after GT t -> predicts i
+        mo, _ = self.model_step(model_input=model_input, label_data=label_data)
+        ar = torch.arange(mo.size(0), device=mo.device)
+        gt_t = fut_ids[:, 2].long(); gt_i = fut_ids[:, 3].long()
+        t_logits = self.decoder.decoder_mlp[1](mo[:, 2])
+        i_logits = self.decoder.decoder_mlp[2](mo[:, 3])
+        tf_t_rank = (t_logits > t_logits[ar, gt_t].unsqueeze(1)).sum(1)
+        tf_i_rank = (i_logits > i_logits[ar, gt_i].unsqueeze(1)).sum(1)
+        gt_b = fut_ids[:, 0].long()
+        keep = torch.zeros(gt_b.shape[0], dtype=torch.bool)
+        for idx in range(gt_b.shape[0]):
+            if self._tf_n >= self.audit_tf_max_events:
+                break
+            if gt_b[idx].item() == self.audit_tf_pv_id:
+                if self._tf_pv >= self.audit_tf_pv_cap:
+                    continue
+                self._tf_pv += 1
+            keep[idx] = True
+            self._tf_n += 1
+        if keep.any():
+            self._tf_cols["gt_b"].append(gt_b[keep].to(torch.int16).cpu())
+            self._tf_cols["tf_t_rank"].append(tf_t_rank[keep].to(torch.int32).cpu())
+            self._tf_cols["tf_i_rank"].append(tf_i_rank[keep].to(torch.int32).cpu())
+
+    def on_test_epoch_end(self):
+        # Non-audit runs MUST fall through to the base hook that logs test/loss + metrics.
+        if not self.audit_tf_dump:
+            return super().on_test_epoch_end()
+        if self._tf_cols:
+            cols = {k: torch.cat(v, dim=0) for k, v in self._tf_cols.items()}
+            torch.save(
+                {"cols": cols, "meta": {"nb": self.num_behaviors, "pv_id": self.audit_tf_pv_id,
+                                        "buy_id": self.buy_behavior_id, "kind": "chain_tf"}},
+                self.audit_tf_path,
+            )
+            print(f"[chain tf audit] wrote {cols['gt_b'].shape[0]:,} events -> {self.audit_tf_path}",
+                  flush=True)
+        return  # audit run: evaluator was never updated, skip metric logging

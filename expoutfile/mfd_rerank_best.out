@@ -1,0 +1,87 @@
+=== STAGE 1a: VAL_DUMP exists, skipping ===
+=== STAGE 1b: TEST_DUMP exists, skipping ===
+=== STAGE 1c: TRAIN_DUMP exists, skipping ===
+=== STAGE 2: best reranker (+both engagement), full metrics ===
+[init] device=cuda
+[data] mfd_rerank_eng_trainsplit_dump.pt: N=250,000  C=2000  covered(GT in pool)=98,260 (0.3930)  S=200 d=128  hist=yes(H=40)
+[data] mfd_rerank_eng_val_dump.pt: N=83,005  C=2000  covered(GT in pool)=21,467 (0.2586)  S=200 d=128  hist=yes(H=40)
+[data] mfd_rerank_eng_test_dump.pt: N=83,005  C=2000  covered(GT in pool)=21,709 (0.2615)  S=200 d=128  hist=yes(H=40)
+[geom] loaded cached centroids /scratch/yw8866/rec-tmall/mdrqvae_centroids.pt
+
+##############################################################################
+# ABLATION: run  (hard=True soft=True)
+##############################################################################
+[init] reranker params=466,690  d_model=128  layers=2 heads=4  scalar_in=28
+
+[train] 98,260 GT-in-pool TRAIN events (of 250,000)  batch=32  3071 steps/epoch  epochs<=40
+[select] on VAL (21,467 GT-in-pool of 83,005); [report] on TEST (21,709 GT-in-pool of 83,005). No test peeking for selection.
+
+[eval] baseline (union_score, current system):
+  BASE val   t3@5=0.1864 t3@10=0.2018 | t2@5=0.2003 t2@10=0.2089 | P(r<10|cov)=0.7804 cov=0.2586
+             t3 R@20=0.2114 NDCG@5=0.1463 NDCG@10=0.1514  |  t2 R@20=0.2160 NDCG@5=0.1811 NDCG@10=0.1838
+             t3@10 by behavior: pv=0.1538  fav=0.9212  cart=0.9320  buy=0.9330
+             t2@10 by behavior: pv=0.1578  fav=0.9771  cart=0.9771  buy=0.9892
+  BASE test  t3@5=0.1879 t3@10=0.2042 | t2@5=0.2027 t2@10=0.2112 | P(r<10|cov)=0.7806 cov=0.2615
+             t3 R@20=0.2135 NDCG@5=0.1480 NDCG@10=0.1533  |  t2 R@20=0.2181 NDCG@5=0.1834 NDCG@10=0.1861
+             t3@10 by behavior: pv=0.1563  fav=0.9163  cart=0.9421  buy=0.9188
+             t2@10 by behavior: pv=0.1600  fav=0.9740  cart=0.9852  buy=0.9835
+[ep  1] listwise CE=2.1159  (97s)  base_scale=0.715
+  VAL  ep1   t3@5=0.1953 t3@10=0.2131 | t2@5=0.2113 t2@10=0.2204 | P(r<10|cov)=0.8241 cov=0.2586
+             t3 R@20=0.2213 NDCG@5=0.1475 NDCG@10=0.1534  |  t2 R@20=0.2254 NDCG@5=0.1878 NDCG@10=0.1908
+             t3@10 by behavior: pv=0.1643  fav=0.9446  cart=0.9524  buy=0.9554
+             t2@10 by behavior: pv=0.1696  fav=0.9853  cart=0.9876  buy=0.9962
+  TEST ep1   t3@5=0.1974 t3@10=0.2149 | t2@5=0.2134 t2@10=0.2225 | P(r<10|cov)=0.8215 cov=0.2615
+             t3 R@20=0.2233 NDCG@5=0.1498 NDCG@10=0.1556  |  t2 R@20=0.2283 NDCG@5=0.1901 NDCG@10=0.1931
+             t3@10 by behavior: pv=0.1660  fav=0.9471  cart=0.9614  buy=0.9423
+             t2@10 by behavior: pv=0.1715  fav=0.9868  cart=0.9929  buy=0.9924
+             * new best VAL t3@10=0.2131 (test 0.2149) -> saved /scratch/yw8866/rec-tmall/mfd_reranker_best.pt
+[ep  2] listwise CE=2.0622  (94s)  base_scale=0.681
+  VAL  ep2   t3@5=0.1943 t3@10=0.2125 | t2@5=0.2117 t2@10=0.2206 | P(r<10|cov)=0.8218 cov=0.2586
+             t3 R@20=0.2212 NDCG@5=0.1435 NDCG@10=0.1495  |  t2 R@20=0.2254 NDCG@5=0.1885 NDCG@10=0.1914
+             t3@10 by behavior: pv=0.1633  fav=0.9502  cart=0.9549  buy=0.9643
+             t2@10 by behavior: pv=0.1697  fav=0.9853  cart=0.9882  buy=0.9962
+  TEST ep2   t3@5=0.1959 t3@10=0.2142 | t2@5=0.2136 t2@10=0.2226 | P(r<10|cov)=0.8192 cov=0.2615
+             t3 R@20=0.2234 NDCG@5=0.1455 NDCG@10=0.1515  |  t2 R@20=0.2285 NDCG@5=0.1908 NDCG@10=0.1937
+             t3@10 by behavior: pv=0.1652  fav=0.9471  cart=0.9633  buy=0.9480
+             t2@10 by behavior: pv=0.1716  fav=0.9868  cart=0.9929  buy=0.9930
+[ep  3] listwise CE=2.0499  (94s)  base_scale=0.671
+  VAL  ep3   t3@5=0.1930 t3@10=0.2122 | t2@5=0.2121 t2@10=0.2205 | P(r<10|cov)=0.8206 cov=0.2586
+             t3 R@20=0.2213 NDCG@5=0.1382 NDCG@10=0.1445  |  t2 R@20=0.2255 NDCG@5=0.1888 NDCG@10=0.1915
+             t3@10 by behavior: pv=0.1628  fav=0.9517  cart=0.9573  buy=0.9694
+             t2@10 by behavior: pv=0.1697  fav=0.9853  cart=0.9870  buy=0.9974
+  TEST ep3   t3@5=0.1947 t3@10=0.2141 | t2@5=0.2139 t2@10=0.2228 | P(r<10|cov)=0.8185 cov=0.2615
+             t3 R@20=0.2236 NDCG@5=0.1399 NDCG@10=0.1463  |  t2 R@20=0.2285 NDCG@5=0.1910 NDCG@10=0.1939
+             t3@10 by behavior: pv=0.1647  fav=0.9520  cart=0.9665  buy=0.9524
+             t2@10 by behavior: pv=0.1718  fav=0.9863  cart=0.9923  buy=0.9924
+[ep  4] listwise CE=2.0423  (95s)  base_scale=0.664
+  VAL  ep4   t3@5=0.1941 t3@10=0.2127 | t2@5=0.2119 t2@10=0.2206 | P(r<10|cov)=0.8225 cov=0.2586
+             t3 R@20=0.2217 NDCG@5=0.1417 NDCG@10=0.1478  |  t2 R@20=0.2255 NDCG@5=0.1887 NDCG@10=0.1915
+             t3@10 by behavior: pv=0.1634  fav=0.9532  cart=0.9536  buy=0.9656
+             t2@10 by behavior: pv=0.1697  fav=0.9853  cart=0.9882  buy=0.9962
+  TEST ep4   t3@5=0.1960 t3@10=0.2145 | t2@5=0.2137 t2@10=0.2227 | P(r<10|cov)=0.8202 cov=0.2615
+             t3 R@20=0.2237 NDCG@5=0.1437 NDCG@10=0.1498  |  t2 R@20=0.2284 NDCG@5=0.1908 NDCG@10=0.1938
+             t3@10 by behavior: pv=0.1655  fav=0.9486  cart=0.9640  buy=0.9467
+             t2@10 by behavior: pv=0.1717  fav=0.9868  cart=0.9929  buy=0.9924
+[ep  5] listwise CE=2.0350  (95s)  base_scale=0.663
+  VAL  ep5   t3@5=0.1946 t3@10=0.2129 | t2@5=0.2119 t2@10=0.2207 | P(r<10|cov)=0.8230 cov=0.2586
+             t3 R@20=0.2214 NDCG@5=0.1416 NDCG@10=0.1476  |  t2 R@20=0.2256 NDCG@5=0.1888 NDCG@10=0.1917
+             t3@10 by behavior: pv=0.1637  fav=0.9502  cart=0.9542  buy=0.9649
+             t2@10 by behavior: pv=0.1698  fav=0.9853  cart=0.9889  buy=0.9981
+  TEST ep5   t3@5=0.1964 t3@10=0.2147 | t2@5=0.2140 t2@10=0.2229 | P(r<10|cov)=0.8208 cov=0.2615
+             t3 R@20=0.2238 NDCG@5=0.1434 NDCG@10=0.1494  |  t2 R@20=0.2284 NDCG@5=0.1909 NDCG@10=0.1938
+             t3@10 by behavior: pv=0.1656  fav=0.9486  cart=0.9659  buy=0.9448
+             t2@10 by behavior: pv=0.1719  fav=0.9868  cart=0.9936  buy=0.9924
+[ep  6] listwise CE=2.0292  (94s)  base_scale=0.652
+  VAL  ep6   t3@5=0.1946 t3@10=0.2126 | t2@5=0.2120 t2@10=0.2206 | P(r<10|cov)=0.8222 cov=0.2586
+             t3 R@20=0.2214 NDCG@5=0.1438 NDCG@10=0.1498  |  t2 R@20=0.2257 NDCG@5=0.1889 NDCG@10=0.1917
+             t3@10 by behavior: pv=0.1633  fav=0.9512  cart=0.9573  buy=0.9656
+             t2@10 by behavior: pv=0.1697  fav=0.9847  cart=0.9889  buy=0.9981
+  TEST ep6   t3@5=0.1965 t3@10=0.2147 | t2@5=0.2139 t2@10=0.2229 | P(r<10|cov)=0.8208 cov=0.2615
+             t3 R@20=0.2237 NDCG@5=0.1462 NDCG@10=0.1522  |  t2 R@20=0.2283 NDCG@5=0.1910 NDCG@10=0.1939
+             t3@10 by behavior: pv=0.1656  fav=0.9471  cart=0.9665  buy=0.9486
+             t2@10 by behavior: pv=0.1719  fav=0.9868  cart=0.9936  buy=0.9924
+[early stop] no VAL t3@10 gain > 0.0 for 5 epochs -> stop at ep6. best = ep1 (val=0.2131).
+
+[done] model selected on VAL @ ep1 (val t3@10=0.2131).
+[done] TEST t3@10: baseline=0.2042  ->  reranked=0.2149  (gain +0.0107; target 0.233, coverage ceiling ~0.262)
+[done] (VAL baseline t3@10=0.2018)

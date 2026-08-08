@@ -1,0 +1,100 @@
+
+======================================================================
+SID <-> behavior coupling probe
+======================================================================
+  data_dir : /scratch/yw8866/rec-tmall/tfrecords_mb_userdrop
+  sid_path : /scratch/yw8866/logs/inference/runs/2026-05-06/2048_1024/pickle/semantic_ids.pt
+  part=mi  max_users=None
+  prior correction: ACTIVE (userdrop train prior != eval)
+[13:53:28] SIDs (3, 8133508)  N=8,133,508  placeholder(all-zero) columns=2,723,715
+
+======================================================================
+PART A - behavior predictability from SID
+======================================================================
+2026-07-18 13:53:31.448614: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-07-18 13:53:34.996573: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 AVX512_FP16 AVX_VNNI AMX_TILE AMX_INT8 AMX_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2026-07-18 13:53:58.053090: I tensorflow/core/kernels/data/tf_record_dataset_op.cc:370] TFRecordDataset `buffer_size` is unspecified, default to 262144
+[13:55:45]   train 200,000 users (2.3 min)
+[13:57:31]   train 400,000 users (4.1 min)
+[13:59:17]   train 600,000 users (5.8 min)
+2026-07-18 13:59:50.344871: I tensorflow/core/framework/local_rendezvous.cc:405] Local rendezvous is aborting with status: OUT_OF_RANGE: End of sequence
+[13:59:50] training: 664,043 users, 44,719,321 events, coverage-skip 0.000%
+[13:59:56] triple table: 3,208,147 distinct, 153,894 with >=50 support
+2026-07-18 14:00:37.042412: I tensorflow/core/framework/local_rendezvous.cc:405] Local rendezvous is aborting with status: OUT_OF_RANGE: End of sequence
+[14:00:37] eval: 83,005 users, 5,642,461 events, coverage-skip 0.000%
+[14:00:37] eval scoring transitions: 5,559,456  (all events 5,642,461)
+
+  behavior priors:
+    pv   : train= 80.00%  eval= 93.75%
+    fav  : train=  7.53%  eval=  2.24%
+    cart : train=  9.11%  eval=  2.94%
+    buy  : train=  3.36%  eval=  1.06%
+
+======================================================================
+A.1  Mutual information (eval split)
+======================================================================
+  H(B) = 0.4293 bits
+  signal              MI(bits)   MI/H(B)
+  MI(B; ID_shared )    0.0176     0.041
+  MI(B; ID_text   )    0.0090     0.021
+  MI(B; ID_img    )    0.0096     0.022
+  MI(B; b_prev)         0.0150     0.035   <- reference bar
+
+======================================================================
+A.2  Buy lift by shared code (train rate >=200 occ, eval traffic)
+======================================================================
+  global buy base rate (train): 3.357%   qualifying codes: 2046/2048
+    lift   #codes  eval traffic %  mean buy rate
+  >   2x      718            7.61         10.382
+  >   5x        1            0.00         17.736
+  >  10x        0            0.00          0.000
+
+======================================================================
+A.3  Held-out buy detection (max-F1 over threshold)
+======================================================================
+  model                               buy_F1   prec    rec      thr
+  (i)   P(b|b_prev)  history-only [uncorrected]   0.197  0.200  0.195   0.3640
+  (i)   P(b|b_prev)  history-only [prior-corrected]   0.197  0.200  0.195   0.1354
+  (ii)  P(b|shared,b_prev) [uncorrected]   0.252  0.223  0.289   0.1258
+  (ii)  P(b|shared,b_prev) [prior-corrected]   0.253  0.224  0.290   0.0416
+  (iii) P(b|ID_shared)  attribution [uncorrected]   0.094  0.062  0.197   0.0953
+  (iii) P(b|ID_shared)  attribution [prior-corrected]   0.095  0.063  0.187   0.0336
+
+======================================================================
+A  DECISION GATE
+======================================================================
+  buy_F1: (i) history-only = 0.197   (ii) +SID = 0.253   Delta = +0.056
+  reference: current model's focal buy_F1 ceiling ~ 0.34
+  VERDICT: GREEN  -> Step 2 (SID-conditioned behavior head) has real signal.
+
+======================================================================
+A.4  Modality additivity - held-out predictive MI (train-fit, eval-scored)
+======================================================================
+  H(B)=0.4293 bits   (prior-corrected, Dirichlet a=1, backoff->shared @ min50)
+  code set                pred-MI  Δ vs shared
+  shared                   0.0146            -
+  shared+text              0.0165      +0.0020
+  shared+img               0.0167      +0.0021
+  shared+text+img          0.0176      +0.0030
+  -> modality residuals ADD behavior info: +0.0030 bits (21% over shared) — count-level additivity proof.
+
+======================================================================
+A.5  Repeat-evidence value (count-based)
+======================================================================
+  next-item prior interaction -> P(buy)  (eval)
+  category                  n(eval)   P(buy)   lift
+  not in history          4,073,897    0.01%    0.0
+  pv only                 1,072,523    1.36%    1.3
+  has fav (no cart)         129,315    1.66%    1.6
+  has cart                  263,000   15.91%   15.1
+  has buy                    62,344    3.09%    2.9
+
+  buy detection max-F1 (prior-corrected):
+    (i)   b_prev only               0.197
+    (ii)  + ID_shared               0.253   (Δ vs i +0.056)
+    (b1)  + repeat-set (no SID)      0.376   (Δ vs i +0.179)
+    (b2)  + repeat-set + ID_shared   0.416   (Δ vs b1 +0.040  = SID's add on top of repeat)
+  attribution: repeat feature contributes +0.179, SID adds +0.040 on top;
+               SID alone over history was +0.056 (A.3).
+[14:01:23] artifacts saved: /scratch/yw8866/rec-tmall/coupling_artifacts_mi.pt

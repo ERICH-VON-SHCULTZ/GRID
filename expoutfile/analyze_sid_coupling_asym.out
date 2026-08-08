@@ -1,0 +1,92 @@
+
+======================================================================
+SID <-> behavior coupling probe
+======================================================================
+  data_dir : /scratch/yw8866/rec-tmall/tfrecords_mb_userdrop
+  sid_path : /scratch/yw8866/logs/inference/runs/2026-05-06/2048_1024/pickle/semantic_ids.pt
+  part=asym  max_users=None
+  prior correction: ACTIVE (userdrop train prior != eval)
+[12:15:41] SIDs (3, 8133508)  N=8,133,508  placeholder(all-zero) columns=2,723,715
+
+======================================================================
+PART B - per-behavior modality asymmetry
+======================================================================
+[12:15:41] device: cuda
+[12:15:41] loading centroids from /scratch/yw8866/logs/train/runs/2026-05-06/2048_1024/checkpoints/checkpoint_000_010000.ckpt (mmap) ...
+[12:18:02]   centroid table: shared_codebook.centroids  (2048, 512)
+[12:18:02]   centroid table: text_codebook.centroids  (1024, 512)
+[12:18:02]   centroid table: image_codebook.centroids  (1024, 512)
+[12:18:05] building normalized views V_t, V_i, V_shared ...
+[12:18:32] views built; valid items 5,409,793
+2026-07-18 12:18:36.269337: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-07-18 12:18:39.604172: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2026-07-18 12:19:02.361556: I tensorflow/core/kernels/data/tf_record_dataset_op.cc:370] TFRecordDataset `buffer_size` is unspecified, default to 262144
+2026-07-18 12:20:10.999410: I tensorflow/core/framework/local_rendezvous.cc:405] Local rendezvous is aborting with status: OUT_OF_RANGE: End of sequence
+[12:20:11] transitions: 851,753  (pv kept 500,000)  from 83,005 users
+[12:20:11]   pv   :   500,000  repeat   83,393
+[12:20:11]   fav  :   126,231  repeat   34,711
+[12:20:11]   cart :   165,908  repeat   70,191
+[12:20:11]   buy  :    59,614  repeat   54,980
+[12:20:15] ranked view scores (last history)
+[12:20:28] ranked view scores (mean history)
+
+======================================================================
+B.1  R@10 by behavior x view  (last history)
+======================================================================
+
+  [non-repeat]
+  behavior  R@10 text   R@10 img   Δ(t-i)            95% CI   shared
+  pv            0.223      0.219    0.004   [+0.003,+0.004]    0.172
+  fav           0.909      0.909   -0.000   [-0.000,+0.000]    0.719
+  cart          0.941      0.941   -0.000   [-0.000,+0.000]    0.763
+  buy           0.911      0.911   -0.001   [-0.002,+0.001]    0.741
+
+  [repeat]
+  behavior  R@10 text   R@10 img   Δ(t-i)            95% CI   shared
+  pv            0.568      0.564    0.004   [+0.003,+0.006]    0.447
+  fav           0.676      0.670    0.006   [+0.004,+0.009]    0.530
+  cart          0.790      0.786    0.004   [+0.003,+0.006]    0.638
+  buy           0.718      0.714    0.004   [+0.003,+0.006]    0.579
+
+  [all]
+  behavior  R@10 text   R@10 img   Δ(t-i)            95% CI   shared
+  pv            0.280      0.277    0.004   [+0.003,+0.005]    0.218
+  fav           0.845      0.843    0.002   [+0.001,+0.002]    0.667
+  cart          0.877      0.875    0.002   [+0.001,+0.002]    0.710
+  buy           0.733      0.729    0.004   [+0.003,+0.005]    0.592
+
+======================================================================
+B.1  R@10 by behavior x view  (mean history)
+======================================================================
+
+  [non-repeat]
+  behavior  R@10 text   R@10 img   Δ(t-i)            95% CI   shared
+  pv            0.103      0.098    0.005   [+0.004,+0.005]    0.085
+  fav           0.193      0.177    0.015   [+0.014,+0.017]    0.147
+  cart          0.238      0.219    0.019   [+0.017,+0.020]    0.179
+  buy           0.147      0.137    0.009   [+0.004,+0.015]    0.116
+
+  [repeat]
+  behavior  R@10 text   R@10 img   Δ(t-i)            95% CI   shared
+  pv            0.498      0.464    0.034   [+0.032,+0.036]    0.379
+  fav           0.457      0.413    0.044   [+0.041,+0.047]    0.332
+  cart          0.568      0.525    0.043   [+0.041,+0.045]    0.429
+  buy           0.649      0.609    0.040   [+0.038,+0.043]    0.498
+
+  [all]
+  behavior  R@10 text   R@10 img   Δ(t-i)            95% CI   shared
+  pv            0.169      0.159    0.010   [+0.009,+0.010]    0.134
+  fav           0.265      0.242    0.023   [+0.022,+0.025]    0.198
+  cart          0.377      0.348    0.029   [+0.027,+0.030]    0.285
+  buy           0.610      0.572    0.038   [+0.035,+0.040]    0.469
+
+======================================================================
+B  DECISION GATE (last-item history, non-repeat)
+======================================================================
+  Δ_buy - Δ_pv (R@10 text-advantage) = -0.43 pts   95% CI [-0.58, -0.28]
+  VERDICT: RED  -> gating hypothesis dead (CI includes 0 or |gap| < 2 pts);
+           BM-TV stays shelved, and this retroactively explains the flat ungated BM-TV.
+  bonus [pv]: shared-only R@10=0.172 vs full-avg 0.221  (residuals add signal)
+  bonus [buy]: shared-only R@10=0.741 vs full-avg 0.911  (residuals add signal)
+[12:21:12] artifacts saved: /scratch/yw8866/rec-tmall/coupling_artifacts_asym.pt

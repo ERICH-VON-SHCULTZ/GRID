@@ -1,0 +1,44 @@
+
+======================================================================
+SID <-> behavior coupling probe
+======================================================================
+  data_dir : /scratch/yw8866/rec-tmall/tfrecords_mb_userdrop
+  sid_path : /scratch/yw8866/logs/inference/runs/2026-05-06/2048_1024/pickle/semantic_ids.pt
+  part=factor  max_users=None
+  prior correction: ACTIVE (userdrop train prior != eval)
+[17:43:44] SIDs (3, 8133508)  N=8,133,508  placeholder(all-zero) columns=2,723,715
+
+======================================================================
+PART G (§12g) - is the L1/L2 (text/image) factorization near-lossless?
+======================================================================
+[17:43:44] items used=5,409,793  (dropped 2,723,715 placeholders)  L0∈[0,2048) L1 radix=1024 L2 radix=1024
+[17:43:47]   shuffle 1/3: CMI_null=2.7218 bits
+[17:43:50]   shuffle 2/3: CMI_null=2.7212 bits
+[17:43:52]   shuffle 3/3: CMI_null=2.7212 bits
+
+  marginal entropies (bits):
+    H(L0 shared) = 10.593   H(L1 text) = 9.903   H(L2 img) = 9.554
+    unconditional MI(L1;L2)        = 1.5940 bits   (16.7% of min(H1,H2))
+
+  conditional on the shared code L0 (bits):
+    H(L1|L0) = 7.1125
+    H(L2|L0) = 6.8950
+    H(L1,L2|L0) = 11.1662   (identity check: H1g+H2g-CMI = 11.1662)
+
+  CMI(L1;L2 | L0) — residual text/image coupling AFTER the shared code:
+    plug-in (raw)       = 2.8413 bits
+    null floor (shuffle)= 2.7214 bits   <- estimator bias
+    bias-corrected      = 0.1199 bits
+
+  normalised (corrected CMI as a fraction of the code entropy it could couple):
+    CMI / H(L1|L0)   =   1.69%   <- of the text code is coupled to image | L0
+    CMI / H(L2|L0)   =   1.74%   <- of the image code is coupled to text | L0
+    CMI / H(L1,L2|L0)=   1.07%   <- of the joint conditional entropy
+
+======================================================================
+G  DECISION GATE  (is MFD licensed by the data?)
+======================================================================
+  residual coupling = 1.74% of the smaller conditional code entropy
+  (unconditional coupling was 16.7% -> the shared code L0 absorbs 92.5% of it)
+  VERDICT: GREEN  -> given L0 the text/image codes are near-independent; the factorization P(L1,L2|L0)=P(L1|L0)P(L2|L0) is near-lossless. MFD is licensed by the data before any training.
+[17:43:52] artifacts saved: /scratch/yw8866/rec-tmall/coupling_artifacts_factor.pt
